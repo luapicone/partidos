@@ -62,6 +62,8 @@ class BacktestResult:
     log_loss: float
     brier_score: float
     avg_confidence: float
+    baseline_home_accuracy: float
+    baseline_elo_accuracy: float
 
 
 def _result_points(goals_for: int, goals_against: int) -> int:
@@ -73,7 +75,7 @@ def _result_points(goals_for: int, goals_against: int) -> int:
 
 
 def _goal_margin_multiplier(goal_diff: int) -> float:
-    return math.log(goal_diff + 1.0) * (2.2 / 2.2)
+    return math.log(goal_diff + 1.0) * 2.2
 
 
 def _expected_from_elo(rating_a: float, rating_b: float) -> float:
@@ -133,6 +135,8 @@ def build_elo_history(results: pd.DataFrame) -> dict[str, float]:
 def _team_matches(results: pd.DataFrame, team: str) -> pd.DataFrame:
     mask = (results["home_team"] == team) | (results["away_team"] == team)
     matches = results.loc[mask].copy()
+    if matches.empty:
+        return matches.sort_values("date")
     matches["is_home"] = matches["home_team"] == team
     matches["goals_for"] = matches.apply(
         lambda row: row["home_score"] if row["is_home"] else row["away_score"], axis=1
@@ -365,6 +369,50 @@ def _actual_outcome(row: pd.Series) -> str:
     return "draw"
 
 
+def _evaluate_single_match(row: pd.Series, prediction: Prediction) -> dict[str, float]:
+    probs = {
+        "home": prediction.win_prob_a,
+        "draw": prediction.draw_prob,
+        "away": prediction.win_prob_b,
+    }
+    actual = _actual_outcome(row)
+    predicted = max(probs, key=probs.get)
+
+    home_baseline = 1.0 if actual == "home" else 0.0
+    elo_home = prediction.team_a_snapshot.elo + (0.0 if bool(row["neutral"]) else HOME_ADVANTAGE)
+    elo_away = prediction.team_b_snapshot.elo
+    elo_predicted = "home" if elo_home >= elo_away else "away"
+    elo_baseline = 1.0 if elo_predicted == actual else 0.0
+
+    target = {"home": 0.0, "draw": 0.0, "away": 0.0}
+    target[actual] = 1.0
+
+    return {
+        "hit": float(predicted == actual),
+        "confidence": probs[predicted],
+        "log_loss": -math.log(max(probs[actual], 1e-9)),
+        "brier": sum((probs[key] - target[key]) ** 2 for key in probs),
+        "baseline_home_hit": home_baseline,
+        "baseline_elo_hit": elo_baseline,
+    }
+
+
+def _finalize_backtest(metrics: list[dict[str, float]]) -> BacktestResult:
+    evaluated = len(metrics)
+    if evaluated == 0:
+        raise ValueError("No hubo suficientes partidos historicos para evaluar el backtest.")
+
+    return BacktestResult(
+        matches_evaluated=evaluated,
+        accuracy=sum(item["hit"] for item in metrics) / evaluated,
+        log_loss=sum(item["log_loss"] for item in metrics) / evaluated,
+        brier_score=sum(item["brier"] for item in metrics) / evaluated,
+        avg_confidence=sum(item["confidence"] for item in metrics) / evaluated,
+        baseline_home_accuracy=sum(item["baseline_home_hit"] for item in metrics) / evaluated,
+        baseline_elo_accuracy=sum(item["baseline_elo_hit"] for item in metrics) / evaluated,
+    )
+
+
 def run_backtest(
     results: pd.DataFrame,
     matches_to_test: int = 200,
@@ -374,50 +422,67 @@ def run_backtest(
     clean = clean.sort_values("date").reset_index(drop=True)
     test_slice = clean.iloc[-matches_to_test:]
 
-    hits = 0
-    log_loss_total = 0.0
-    brier_total = 0.0
-    confidence_total = 0.0
-    evaluated = 0
+    metrics: list[dict[str, float]] = []
 
-    for row in test_slice.itertuples(index=False):
-        history = clean.loc[clean["date"] < row.date]
+    for _, row in test_slice.iterrows():
+        history = clean.loc[clean["date"] < row["date"]]
         if len(history) < min_history_matches:
             continue
 
         prediction = predict_match(
             results=history,
-            team_a=row.home_team,
-            team_b=row.away_team,
-            match_date=str(row.date.date()),
-            neutral=bool(row.neutral),
+            team_a=row["home_team"],
+            team_b=row["away_team"],
+            match_date=str(row["date"].date()),
+            neutral=bool(row["neutral"]),
         )
+        metrics.append(_evaluate_single_match(row, prediction))
 
-        probs = {
-            "home": prediction.win_prob_a,
-            "draw": prediction.draw_prob,
-            "away": prediction.win_prob_b,
-        }
-        actual = "home" if row.home_score > row.away_score else "away" if row.home_score < row.away_score else "draw"
-        predicted = max(probs, key=probs.get)
+    return _finalize_backtest(metrics)
 
-        hits += int(predicted == actual)
-        confidence_total += probs[predicted]
-        actual_prob = max(probs[actual], 1e-9)
-        log_loss_total += -math.log(actual_prob)
 
-        target = {"home": 0.0, "draw": 0.0, "away": 0.0}
-        target[actual] = 1.0
-        brier_total += sum((probs[key] - target[key]) ** 2 for key in probs)
-        evaluated += 1
+def run_rolling_backtest(
+    results: pd.DataFrame,
+    folds: int = 5,
+    min_history_matches: int = 500,
+) -> list[BacktestResult]:
+    if folds <= 0:
+        raise ValueError("folds debe ser mayor que 0.")
 
-    if evaluated == 0:
-        raise ValueError("No hubo suficientes partidos historicos para evaluar el backtest.")
+    clean = results.loc[results["home_score"].notna() & results["away_score"].notna()].copy()
+    clean = clean.sort_values("date").reset_index(drop=True)
+    candidate = clean.iloc[min_history_matches:].copy()
+    if candidate.empty:
+        raise ValueError("No hay suficientes partidos para ejecutar rolling backtest.")
 
-    return BacktestResult(
-        matches_evaluated=evaluated,
-        accuracy=hits / evaluated,
-        log_loss=log_loss_total / evaluated,
-        brier_score=brier_total / evaluated,
-        avg_confidence=confidence_total / evaluated,
-    )
+    fold_size = len(candidate) // folds
+    if fold_size == 0:
+        raise ValueError("No hay suficientes partidos para repartir en la cantidad de folds solicitada.")
+
+    reports: list[BacktestResult] = []
+    start = 0
+    for fold_index in range(folds):
+        end = len(candidate) if fold_index == folds - 1 else start + fold_size
+        fold_rows = candidate.iloc[start:end]
+        if fold_rows.empty:
+            break
+
+        metrics: list[dict[str, float]] = []
+        for row_index, row in fold_rows.iterrows():
+            history = clean.iloc[:row_index]
+            if len(history) < min_history_matches:
+                continue
+
+            prediction = predict_match(
+                results=history,
+                team_a=row["home_team"],
+                team_b=row["away_team"],
+                match_date=str(row["date"].date()),
+                neutral=bool(row["neutral"]),
+            )
+            metrics.append(_evaluate_single_match(row, prediction))
+
+        reports.append(_finalize_backtest(metrics))
+        start = end
+
+    return reports

@@ -4,7 +4,7 @@ import argparse
 from pathlib import Path
 
 from .data import download_results, load_results
-from .model import predict_match, run_backtest
+from .model import predict_match, run_backtest, run_rolling_backtest
 from .output import render_prediction, render_tiktok_script, write_probability_chart_svg
 
 
@@ -37,6 +37,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Actualiza el dataset antes del backtest",
     )
+
+    rolling_parser = subparsers.add_parser(
+        "backtest-rolling",
+        help="Evalua el modelo en ventanas temporales consecutivas",
+    )
+    rolling_parser.add_argument("--folds", type=int, default=5)
+    rolling_parser.add_argument("--min-history", type=int, default=500)
+    rolling_parser.add_argument("--force-download", action="store_true")
 
     predict_parser = subparsers.add_parser("predict", help="Predice un partido")
     predict_parser.add_argument("--team-a", required=True, help="Equipo local o equipo A")
@@ -92,6 +100,34 @@ def main() -> None:
         print(f"- Log loss: {report.log_loss:.4f}")
         print(f"- Brier score: {report.brier_score:.4f}")
         print(f"- Confianza promedio del pick: {report.avg_confidence * 100:.2f}%")
+        print(f"--- Baselines de comparacion ---")
+        print(f"- Baseline siempre local: {report.baseline_home_accuracy * 100:.2f}%")
+        print(f"- Baseline Elo puro: {report.baseline_elo_accuracy * 100:.2f}%")
+        return
+
+    if args.command == "backtest-rolling":
+        results = load_results(force_download=args.force_download)
+        reports = run_rolling_backtest(
+            results=results,
+            folds=args.folds,
+            min_history_matches=args.min_history,
+        )
+        print(f"Rolling backtest ({args.folds} folds)")
+        for index, report in enumerate(reports, start=1):
+            print(
+                f"Fold {index}: "
+                f"accuracy={report.accuracy * 100:.2f}% "
+                f"log_loss={report.log_loss:.4f} "
+                f"brier={report.brier_score:.4f}"
+            )
+        average_accuracy = sum(report.accuracy for report in reports) / len(reports)
+        average_log_loss = sum(report.log_loss for report in reports) / len(reports)
+        average_brier = sum(report.brier_score for report in reports) / len(reports)
+        print(
+            f"Promedio: accuracy={average_accuracy * 100:.2f}% "
+            f"log_loss={average_log_loss:.4f} "
+            f"brier={average_brier:.4f}"
+        )
         return
 
     if args.command == "predict":
