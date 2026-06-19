@@ -260,7 +260,28 @@ def _poisson_probability(lmbda: float, goals: int) -> float:
     return math.exp(-lmbda) * (lmbda**goals) / math.factorial(goals)
 
 
-def _probability_matrix(lambda_a: float, lambda_b: float) -> tuple[float, float, float, tuple[int, int]]:
+def _dixon_coles_tau(
+    goals_a: int,
+    goals_b: int,
+    lambda_a: float,
+    lambda_b: float,
+    rho: float,
+) -> float:
+    if goals_a == 0 and goals_b == 0:
+        tau = 1.0 - lambda_a * lambda_b * rho
+        return max(tau, 1e-6)
+    if goals_a == 1 and goals_b == 0:
+        return 1.0 + lambda_b * rho
+    if goals_a == 0 and goals_b == 1:
+        return 1.0 + lambda_a * rho
+    if goals_a == 1 and goals_b == 1:
+        return 1.0 - rho
+    return 1.0
+
+
+def _probability_matrix(
+    lambda_a: float, lambda_b: float, rho: float = 0.1
+) -> tuple[float, float, float, tuple[int, int]]:
     win_a = 0.0
     draw = 0.0
     win_b = 0.0
@@ -269,7 +290,11 @@ def _probability_matrix(lambda_a: float, lambda_b: float) -> tuple[float, float,
 
     for goals_a in range(POISSON_MAX_GOALS + 1):
         for goals_b in range(POISSON_MAX_GOALS + 1):
-            prob = _poisson_probability(lambda_a, goals_a) * _poisson_probability(lambda_b, goals_b)
+            prob = (
+                _poisson_probability(lambda_a, goals_a)
+                * _poisson_probability(lambda_b, goals_b)
+                * _dixon_coles_tau(goals_a, goals_b, lambda_a, lambda_b, rho)
+            )
             if goals_a > goals_b:
                 win_a += prob
             elif goals_a == goals_b:
@@ -297,6 +322,7 @@ def predict_match(
     form_base: float = 0.75,
     form_ref: float = 1.5,
     form_scale: float = 0.10,
+    rho: float = 0.1,
 ) -> Prediction:
     match_ts = pd.Timestamp(match_date)
     history = results.loc[
@@ -366,7 +392,7 @@ def predict_match(
         MAX_EXPECTED_GOALS,
     )
 
-    win_a, draw, win_b, best_score = _probability_matrix(lambda_a, lambda_b)
+    win_a, draw, win_b, best_score = _probability_matrix(lambda_a, lambda_b, rho=rho)
     elo_gap = abs(elo_edge)
     weight = _shrinkage_weight(elo_gap)
     neutral_prob = 1.0 / 3.0
@@ -496,6 +522,7 @@ def run_backtest(
     form_base: float = 0.75,
     form_ref: float = 1.5,
     form_scale: float = 0.10,
+    rho: float = 0.1,
 ) -> BacktestResult:
     clean = results.loc[results["home_score"].notna() & results["away_score"].notna()].copy()
     clean = clean.sort_values("date").reset_index(drop=True)
@@ -517,6 +544,7 @@ def run_backtest(
             form_base=form_base,
             form_ref=form_ref,
             form_scale=form_scale,
+            rho=rho,
         )
         metrics.append(_evaluate_single_match(row, prediction))
 
@@ -701,9 +729,27 @@ def _evaluate_with_cached_elo(
     form_base: float,
     form_ref: float,
     form_scale: float,
+    rho: float = 0.1,
 ) -> BacktestResult:
     metrics: list[dict[str, float | str]] = []
     contexts = _build_calibration_contexts(clean, test_slice, elo_cache, min_history_matches)
+    return _evaluate_with_cached_contexts(
+        contexts=contexts,
+        form_base=form_base,
+        form_ref=form_ref,
+        form_scale=form_scale,
+        rho=rho,
+    )
+
+
+def _evaluate_with_cached_contexts(
+    contexts: list[dict[str, object]],
+    form_base: float,
+    form_ref: float,
+    form_scale: float,
+    rho: float = 0.1,
+) -> BacktestResult:
+    metrics: list[dict[str, float | str]] = []
 
     for context in contexts:
         row = context["row"]
@@ -761,7 +807,7 @@ def _evaluate_with_cached_elo(
             MAX_EXPECTED_GOALS,
         )
 
-        win_a, draw, win_b, best_score = _probability_matrix(lambda_a, lambda_b)
+        win_a, draw, win_b, best_score = _probability_matrix(lambda_a, lambda_b, rho=rho)
         weight = float(context["shrinkage_weight"])
         neutral_prob = 1.0 / 3.0
         win_a = weight * win_a + (1.0 - weight) * neutral_prob
@@ -817,10 +863,11 @@ def calibrate_form_constants(
     results: pd.DataFrame,
     matches_to_test: int = 300,
     min_history_matches: int = 500,
-) -> dict[tuple[float, float, float], float]:
+) -> dict[tuple[float, float, float, float], float]:
     form_bases = [0.75, 0.80, 0.83, 0.87, 0.90]
     form_refs = [1.0, 1.1, 1.2, 1.3, 1.5]
     form_scales = [0.10, 0.13, 0.16, 0.20, 0.25]
+    rhos = [0.05, 0.10, 0.15, 0.20]
     clean = (
         results.loc[results["home_score"].notna() & results["away_score"].notna()]
         .copy()
@@ -830,21 +877,32 @@ def calibrate_form_constants(
 
     test_slice = clean.iloc[-matches_to_test:]
     elo_cache = _build_elo_cache(clean, test_slice, min_history_matches)
+    contexts = _build_calibration_contexts(clean, test_slice, elo_cache, min_history_matches)
 
-    scores: dict[tuple[float, float, float], float] = {}
+    scores: dict[tuple[float, float, float, float], float] = {}
     for form_base in form_bases:
         for form_ref in form_refs:
             for form_scale in form_scales:
-                report = _evaluate_with_cached_elo(
-                    clean=clean,
-                    test_slice=test_slice,
-                    elo_cache=elo_cache,
-                    min_history_matches=min_history_matches,
-                    matches_to_test=matches_to_test,
-                    form_base=form_base,
-                    form_ref=form_ref,
-                    form_scale=form_scale,
-                )
-                scores[(form_base, form_ref, form_scale)] = report.log_loss
+                for rho in rhos:
+                    report = _evaluate_with_cached_contexts(
+                        contexts=contexts,
+                        form_base=form_base,
+                        form_ref=form_ref,
+                        form_scale=form_scale,
+                        rho=rho,
+                    )
+                    scores[(form_base, form_ref, form_scale, rho)] = report.log_loss
+
+    best = min(scores, key=scores.get)
+    print("Calibracion constantes de forma y rho (top 10 por log-loss)")
+    print(f"{'base':>6} {'ref':>6} {'scale':>6} {'rho':>6} {'log_loss':>10}")
+    for combo, log_loss in sorted(scores.items(), key=lambda item: item[1])[:10]:
+        print(
+            f"{combo[0]:>6.2f} {combo[1]:>6.2f} {combo[2]:>6.2f} {combo[3]:>6.2f} {log_loss:>10.4f}"
+        )
+    print(
+        "\nMejor combinacion: "
+        f"form_base={best[0]}, form_ref={best[1]}, form_scale={best[2]}, rho={best[3]}"
+    )
 
     return scores
