@@ -78,6 +78,8 @@ partidos backtest --matches 200
 - `decaimiento temporal`: los partidos mas recientes influyen mas
 - `forma ajustada por rival`: no vale lo mismo sumar contra una seleccion top que contra una debil
 - `backtesting`: accuracy, log loss y brier score para medir calidad del modelo
+- `desbalance real entre equipos`: el modelo ahora amplifica mas los cruces muy desparejos
+- `goles ajustados por rival`: los goles recientes ya no pesan igual contra cualquier oponente
 
 ## Estructura
 

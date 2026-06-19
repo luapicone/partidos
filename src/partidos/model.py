@@ -10,6 +10,9 @@ from .config import (
     ELO_K,
     FORM_MATCHES,
     HOME_ADVANTAGE,
+    MAX_EXPECTED_GOALS,
+    MIN_EXPECTED_GOALS,
+    MISMATCH_ELO_DIVISOR,
     POISSON_MAX_GOALS,
     TIME_DECAY_HALF_LIFE_DAYS,
     TOURNAMENT_WEIGHTS,
@@ -30,6 +33,10 @@ class TeamSnapshot:
     recent_points_adjusted: float
     recent_goals_for_avg: float
     recent_goals_against_avg: float
+    recent_goals_for_adjusted: float
+    recent_goals_against_adjusted: float
+    scoring_rate: float
+    clean_sheet_rate: float
 
 
 @dataclass
@@ -172,6 +179,10 @@ def build_team_snapshot(
             recent_points_adjusted=1.0,
             recent_goals_for_avg=1.0,
             recent_goals_against_avg=1.0,
+            recent_goals_for_adjusted=1.0,
+            recent_goals_against_adjusted=1.0,
+            scoring_rate=0.5,
+            clean_sheet_rate=0.25,
         )
 
     recent = matches.tail(FORM_MATCHES)
@@ -184,6 +195,10 @@ def build_team_snapshot(
         lambda value: _clamp(value / ELO_BASE, 0.8, 1.25)
     )
     recent["adjusted_points"] = recent["points"] * recent["opponent_factor"]
+    recent["adjusted_goals_for"] = recent["goals_for"] * recent["opponent_factor"]
+    recent["adjusted_goals_against"] = recent["goals_against"] * recent["opponent_factor"].map(
+        lambda value: _clamp(2.05 - value, 0.8, 1.25)
+    )
 
     wins = int((matches["points"] == 3).sum())
     draws = int((matches["points"] == 1).sum())
@@ -205,6 +220,18 @@ def build_team_snapshot(
         recent_goals_for_avg=_weighted_average(recent["goals_for"], recent["sample_weight"], 1.0),
         recent_goals_against_avg=_weighted_average(
             recent["goals_against"], recent["sample_weight"], 1.0
+        ),
+        recent_goals_for_adjusted=_weighted_average(
+            recent["adjusted_goals_for"], recent["sample_weight"], 1.0
+        ),
+        recent_goals_against_adjusted=_weighted_average(
+            recent["adjusted_goals_against"], recent["sample_weight"], 1.0
+        ),
+        scoring_rate=_weighted_average(
+            (recent["goals_for"] > 0).astype(float), recent["sample_weight"], 0.5
+        ),
+        clean_sheet_rate=_weighted_average(
+            (recent["goals_against"] == 0).astype(float), recent["sample_weight"], 0.25
         ),
     )
 
@@ -262,20 +289,55 @@ def predict_match(
     team_b_snapshot = build_team_snapshot(history, ratings, team_b, match_ts)
 
     base_goals = float((history["home_score"].mean() + history["away_score"].mean()) / 2.0)
-    attack_a = _clamp(team_a_snapshot.recent_goals_for_avg / max(base_goals, 0.1), 0.45, 1.9)
-    defense_a = _clamp(team_a_snapshot.recent_goals_against_avg / max(base_goals, 0.1), 0.45, 1.9)
-    attack_b = _clamp(team_b_snapshot.recent_goals_for_avg / max(base_goals, 0.1), 0.45, 1.9)
-    defense_b = _clamp(team_b_snapshot.recent_goals_against_avg / max(base_goals, 0.1), 0.45, 1.9)
+    attack_a = _clamp(team_a_snapshot.recent_goals_for_adjusted / max(base_goals, 0.1), 0.42, 2.35)
+    defense_a = _clamp(team_a_snapshot.recent_goals_against_adjusted / max(base_goals, 0.1), 0.35, 2.0)
+    attack_b = _clamp(team_b_snapshot.recent_goals_for_adjusted / max(base_goals, 0.1), 0.42, 2.35)
+    defense_b = _clamp(team_b_snapshot.recent_goals_against_adjusted / max(base_goals, 0.1), 0.35, 2.0)
 
     elo_edge = team_a_snapshot.elo - team_b_snapshot.elo + (0 if neutral else HOME_ADVANTAGE)
-    elo_factor_a = _clamp(math.exp(elo_edge / 800.0), 0.75, 1.35)
-    elo_factor_b = _clamp(math.exp(-elo_edge / 800.0), 0.75, 1.35)
+    elo_factor_a = _clamp(math.exp(elo_edge / 700.0), 0.68, 1.65)
+    elo_factor_b = _clamp(math.exp(-elo_edge / 700.0), 0.55, 1.45)
 
     form_factor_a = _clamp(0.83 + (team_a_snapshot.recent_points_adjusted - 1.2) * 0.16, 0.72, 1.28)
     form_factor_b = _clamp(0.83 + (team_b_snapshot.recent_points_adjusted - 1.2) * 0.16, 0.72, 1.28)
 
-    lambda_a = _clamp(base_goals * attack_a * defense_b * elo_factor_a * form_factor_a, 0.2, 3.4)
-    lambda_b = _clamp(base_goals * attack_b * defense_a * elo_factor_b * form_factor_b, 0.2, 3.4)
+    matchup_gap = elo_edge / MISMATCH_ELO_DIVISOR
+    mismatch_boost_a = _clamp(1.0 + max(matchup_gap, 0.0) * 0.18, 1.0, 1.32)
+    mismatch_boost_b = _clamp(1.0 + max(-matchup_gap, 0.0) * 0.18, 1.0, 1.32)
+    suppression_a = _clamp(1.0 - max(-matchup_gap, 0.0) * 0.12, 0.72, 1.0)
+    suppression_b = _clamp(1.0 - max(matchup_gap, 0.0) * 0.12, 0.55, 1.0)
+
+    scoring_factor_a = _clamp(0.85 + team_a_snapshot.scoring_rate * 0.35, 0.85, 1.20)
+    scoring_factor_b = _clamp(0.85 + team_b_snapshot.scoring_rate * 0.35, 0.85, 1.20)
+    clean_sheet_pressure_a = _clamp(1.08 - team_b_snapshot.clean_sheet_rate * 0.14, 0.92, 1.08)
+    clean_sheet_pressure_b = _clamp(1.08 - team_a_snapshot.clean_sheet_rate * 0.20, 0.80, 1.08)
+
+    lambda_a = _clamp(
+        base_goals
+        * attack_a
+        * defense_b
+        * elo_factor_a
+        * form_factor_a
+        * mismatch_boost_a
+        * suppression_a
+        * scoring_factor_a
+        * clean_sheet_pressure_a,
+        MIN_EXPECTED_GOALS,
+        MAX_EXPECTED_GOALS,
+    )
+    lambda_b = _clamp(
+        base_goals
+        * attack_b
+        * defense_a
+        * elo_factor_b
+        * form_factor_b
+        * mismatch_boost_b
+        * scoring_factor_b
+        * clean_sheet_pressure_b
+        * suppression_b,
+        MIN_EXPECTED_GOALS,
+        MAX_EXPECTED_GOALS,
+    )
 
     win_a, draw, win_b, best_score = _probability_matrix(lambda_a, lambda_b)
 
