@@ -294,9 +294,9 @@ def predict_match(
     team_b: str,
     match_date: str,
     neutral: bool = False,
-    form_base: float = 0.83,
-    form_ref: float = 1.2,
-    form_scale: float = 0.16,
+    form_base: float = 0.75,
+    form_ref: float = 1.5,
+    form_scale: float = 0.10,
 ) -> Prediction:
     match_ts = pd.Timestamp(match_date)
     history = results.loc[
@@ -493,9 +493,9 @@ def run_backtest(
     results: pd.DataFrame,
     matches_to_test: int = 200,
     min_history_matches: int = 500,
-    form_base: float = 0.83,
-    form_ref: float = 1.2,
-    form_scale: float = 0.16,
+    form_base: float = 0.75,
+    form_ref: float = 1.5,
+    form_scale: float = 0.10,
 ) -> BacktestResult:
     clean = results.loc[results["home_score"].notna() & results["away_score"].notna()].copy()
     clean = clean.sort_values("date").reset_index(drop=True)
