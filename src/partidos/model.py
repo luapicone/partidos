@@ -313,6 +313,58 @@ def _shrinkage_weight(elo_gap: float, midpoint: float = 150.0, steepness: float 
     return 1.0 / (1.0 + math.exp(-steepness * (elo_gap - midpoint)))
 
 
+def _head_to_head_factor(
+    history: pd.DataFrame,
+    team_a: str,
+    team_b: str,
+    ratings: dict[str, float],
+    max_matches: int = 10,
+    min_matches: int = 3,
+    half_life_days: float = 1800.0,
+    strength: float = 0.06,
+) -> float:
+    mask = (
+        ((history["home_team"] == team_a) & (history["away_team"] == team_b))
+        | ((history["home_team"] == team_b) & (history["away_team"] == team_a))
+    )
+    h2h = history.loc[mask].copy()
+    if len(h2h) < min_matches:
+        return 1.0
+
+    h2h = h2h.tail(max_matches)
+    rating_a = ratings.get(team_a, ELO_BASE)
+    rating_b = ratings.get(team_b, ELO_BASE)
+    reference_date = history["date"].iloc[-1]
+    weighted_sum = 0.0
+    total_weight = 0.0
+
+    for row in h2h.itertuples(index=False):
+        if row.home_team == team_a:
+            actual_a = 1.0 if row.home_score > row.away_score else 0.5 if row.home_score == row.away_score else 0.0
+            expected_a = _expected_from_elo(
+                rating_a + (0.0 if bool(row.neutral) else HOME_ADVANTAGE),
+                rating_b,
+            )
+        else:
+            actual_a = 1.0 if row.away_score > row.home_score else 0.5 if row.home_score == row.away_score else 0.0
+            expected_a = _expected_from_elo(
+                rating_a,
+                rating_b + (0.0 if bool(row.neutral) else HOME_ADVANTAGE),
+            )
+
+        days_ago = max((reference_date - row.date).days, 0)
+        time_weight = 0.5 ** (days_ago / half_life_days)
+        weighted_sum += (actual_a - expected_a) * time_weight
+        total_weight += time_weight
+
+    if total_weight <= 0.0:
+        return 1.0
+
+    h2h_edge = weighted_sum / total_weight
+    factor = 1.0 + strength * h2h_edge
+    return _clamp(factor, 0.88, 1.12)
+
+
 def predict_match(
     results: pd.DataFrame,
     team_a: str,
@@ -336,6 +388,8 @@ def predict_match(
     ratings = build_elo_history(history)
     team_a_snapshot = build_team_snapshot(history, ratings, team_a, match_ts)
     team_b_snapshot = build_team_snapshot(history, ratings, team_b, match_ts)
+    h2h_factor_a = _head_to_head_factor(history, team_a, team_b, ratings)
+    h2h_factor_b = _head_to_head_factor(history, team_b, team_a, ratings)
 
     base_goals = float((history["home_score"].mean() + history["away_score"].mean()) / 2.0)
     attack_a = _clamp(team_a_snapshot.recent_goals_for_adjusted / max(base_goals, 0.1), 0.42, 2.35)
@@ -363,7 +417,8 @@ def predict_match(
         * defense_b
         * elo_factor_a
         * form_factor_a
-        * clean_sheet_pressure_a,
+        * clean_sheet_pressure_a
+        * h2h_factor_a,
         MIN_EXPECTED_GOALS,
         MAX_EXPECTED_GOALS,
     )
@@ -373,7 +428,8 @@ def predict_match(
         * defense_a
         * elo_factor_b
         * form_factor_b
-        * clean_sheet_pressure_b,
+        * clean_sheet_pressure_b
+        * h2h_factor_b,
         MIN_EXPECTED_GOALS,
         MAX_EXPECTED_GOALS,
     )
