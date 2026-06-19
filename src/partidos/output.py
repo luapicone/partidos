@@ -40,6 +40,8 @@ def render_prediction(prediction: Prediction) -> str:
             f"- Goles esperados {prediction.team_b}: {prediction.expected_goals_b:.2f}",
             f"- Forma reciente {prediction.team_a}: {a.recent_points_per_match:.2f} pts/partido",
             f"- Forma reciente {prediction.team_b}: {b.recent_points_per_match:.2f} pts/partido",
+            f"- Forma ajustada rival {prediction.team_a}: {a.recent_points_adjusted:.2f}",
+            f"- Forma ajustada rival {prediction.team_b}: {b.recent_points_adjusted:.2f}",
         ]
     )
 

@@ -15,3 +15,18 @@ ELO_K = 32.0
 HOME_ADVANTAGE = 55.0
 FORM_MATCHES = 8
 POISSON_MAX_GOALS = 8
+TIME_DECAY_HALF_LIFE_DAYS = 540.0
+
+TOURNAMENT_WEIGHTS = {
+    "friendly": 0.65,
+    "uefa nations league": 1.05,
+    "afc asian cup": 1.15,
+    "copa america": 1.2,
+    "gold cup": 1.15,
+    "african cup of nations": 1.15,
+    "fifa world cup qualification": 1.15,
+    "uefa euro qualification": 1.15,
+    "uefa euro": 1.2,
+    "fifa world cup": 1.3,
+    "confederations cup": 1.15,
+}

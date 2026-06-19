@@ -8,9 +8,11 @@ Esta primera version esta enfocada en `selecciones nacionales`, porque usa un da
 
 1. descargar resultados historicos
 2. calcular ratings tipo Elo
-3. medir forma reciente y promedios de gol
-4. estimar probabilidades de victoria, empate y marcador probable
-5. generar una salida corta estilo TikTok
+3. ponderar partidos oficiales vs amistosos
+4. medir forma reciente ajustada por nivel de rival y decaimiento temporal
+5. estimar probabilidades de victoria, empate y marcador probable
+6. validar el modelo con backtesting
+7. generar una salida corta estilo TikTok
 
 ## Instalacion
 
@@ -37,14 +39,28 @@ partidos predict \
   --tiktok-script
 ```
 
+## Medir si el modelo realmente sirve
+
+```bash
+partidos backtest --matches 200
+```
+
 ## Que devuelve
 
 - probabilidades de `equipo A / empate / equipo B`
 - `marcador mas probable`
 - ratings Elo
 - forma reciente
+- forma reciente ajustada por rival
 - goles esperados
 - guion corto para narracion
+
+## Mejoras agregadas sobre el MVP inicial
+
+- `peso de torneo`: amistosos pesan menos que eliminatorias y mundial
+- `decaimiento temporal`: los partidos mas recientes influyen mas
+- `forma ajustada por rival`: no vale lo mismo sumar contra una seleccion top que contra una debil
+- `backtesting`: accuracy, log loss y brier score para medir calidad del modelo
 
 ## Estructura
 

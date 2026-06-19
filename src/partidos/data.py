@@ -33,5 +33,8 @@ def load_results(force_download: bool = False) -> pd.DataFrame:
     df = df.dropna(subset=["date"]).copy()
     df["home_score"] = pd.to_numeric(df["home_score"], errors="coerce")
     df["away_score"] = pd.to_numeric(df["away_score"], errors="coerce")
+    df["neutral"] = (
+        df["neutral"].astype(str).str.strip().str.lower().map({"true": True, "false": False})
+    )
     df = df.sort_values("date").reset_index(drop=True)
     return df
