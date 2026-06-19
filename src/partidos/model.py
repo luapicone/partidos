@@ -53,6 +53,7 @@ class Prediction:
     draw_prob: float
     win_prob_b: float
     most_likely_score: tuple[int, int]
+    shrinkage_weight: float
 
 
 @dataclass
@@ -274,6 +275,10 @@ def _probability_matrix(lambda_a: float, lambda_b: float) -> tuple[float, float,
     return win_a / total, draw / total, win_b / total, best_score
 
 
+def _shrinkage_weight(elo_gap: float, midpoint: float = 150.0, steepness: float = 0.018) -> float:
+    return 1.0 / (1.0 + math.exp(-steepness * (elo_gap - midpoint)))
+
+
 def predict_match(
     results: pd.DataFrame,
     team_a: str,
@@ -353,6 +358,12 @@ def predict_match(
     )
 
     win_a, draw, win_b, best_score = _probability_matrix(lambda_a, lambda_b)
+    elo_gap = abs(elo_edge)
+    weight = _shrinkage_weight(elo_gap)
+    neutral_prob = 1.0 / 3.0
+    win_a = weight * win_a + (1.0 - weight) * neutral_prob
+    draw = weight * draw + (1.0 - weight) * neutral_prob
+    win_b = weight * win_b + (1.0 - weight) * neutral_prob
 
     return Prediction(
         team_a=team_a,
@@ -367,6 +378,7 @@ def predict_match(
         draw_prob=draw,
         win_prob_b=win_b,
         most_likely_score=best_score,
+        shrinkage_weight=weight,
     )
 
 
