@@ -64,6 +64,8 @@ class BacktestResult:
     avg_confidence: float
     baseline_home_accuracy: float
     baseline_elo_accuracy: float
+    tournament_accuracy: dict[str, float]
+    elo_gap_accuracy: dict[str, float]
 
 
 def _result_points(goals_for: int, goals_against: int) -> int:
@@ -278,6 +280,9 @@ def predict_match(
     team_b: str,
     match_date: str,
     neutral: bool = False,
+    form_base: float = 0.83,
+    form_ref: float = 1.2,
+    form_scale: float = 0.16,
 ) -> Prediction:
     match_ts = pd.Timestamp(match_date)
     history = results.loc[
@@ -302,8 +307,12 @@ def predict_match(
     elo_factor_a = _clamp(math.exp(elo_edge / 700.0), 0.68, 1.65)
     elo_factor_b = _clamp(math.exp(-elo_edge / 700.0), 0.55, 1.45)
 
-    form_factor_a = _clamp(0.83 + (team_a_snapshot.recent_points_adjusted - 1.2) * 0.16, 0.72, 1.28)
-    form_factor_b = _clamp(0.83 + (team_b_snapshot.recent_points_adjusted - 1.2) * 0.16, 0.72, 1.28)
+    form_factor_a = _clamp(
+        form_base + (team_a_snapshot.recent_points_adjusted - form_ref) * form_scale, 0.72, 1.28
+    )
+    form_factor_b = _clamp(
+        form_base + (team_b_snapshot.recent_points_adjusted - form_ref) * form_scale, 0.72, 1.28
+    )
 
     matchup_gap = elo_edge / MISMATCH_ELO_DIVISOR
     mismatch_boost_a = _clamp(1.0 + max(matchup_gap, 0.0) * 0.18, 1.0, 1.32)
@@ -369,7 +378,19 @@ def _actual_outcome(row: pd.Series) -> str:
     return "draw"
 
 
-def _evaluate_single_match(row: pd.Series, prediction: Prediction) -> dict[str, float]:
+def _elo_gap_bucket(elo_gap: float) -> str:
+    if elo_gap <= 50:
+        return "0-50"
+    if elo_gap <= 100:
+        return "51-100"
+    if elo_gap <= 200:
+        return "101-200"
+    if elo_gap <= 350:
+        return "201-350"
+    return "350+"
+
+
+def _evaluate_single_match(row: pd.Series, prediction: Prediction) -> dict[str, float | str]:
     probs = {
         "home": prediction.win_prob_a,
         "draw": prediction.draw_prob,
@@ -383,6 +404,11 @@ def _evaluate_single_match(row: pd.Series, prediction: Prediction) -> dict[str, 
     elo_away = prediction.team_b_snapshot.elo
     elo_predicted = "home" if elo_home >= elo_away else "away"
     elo_baseline = 1.0 if elo_predicted == actual else 0.0
+    elo_gap = abs(
+        prediction.team_a_snapshot.elo
+        - prediction.team_b_snapshot.elo
+        + (HOME_ADVANTAGE if not row["neutral"] else 0.0)
+    )
 
     target = {"home": 0.0, "draw": 0.0, "away": 0.0}
     target[actual] = 1.0
@@ -394,22 +420,51 @@ def _evaluate_single_match(row: pd.Series, prediction: Prediction) -> dict[str, 
         "brier": sum((probs[key] - target[key]) ** 2 for key in probs),
         "baseline_home_hit": home_baseline,
         "baseline_elo_hit": elo_baseline,
+        "tournament": str(row["tournament"]),
+        "elo_gap": elo_gap,
     }
 
 
-def _finalize_backtest(metrics: list[dict[str, float]]) -> BacktestResult:
+def _finalize_backtest(metrics: list[dict[str, float | str]]) -> BacktestResult:
     evaluated = len(metrics)
     if evaluated == 0:
         raise ValueError("No hubo suficientes partidos historicos para evaluar el backtest.")
 
+    tournament_totals: dict[str, list[float]] = {}
+    elo_gap_totals: dict[str, list[float]] = {
+        "0-50": [],
+        "51-100": [],
+        "101-200": [],
+        "201-350": [],
+        "350+": [],
+    }
+
+    for item in metrics:
+        tournament = str(item["tournament"])
+        tournament_totals.setdefault(tournament, []).append(float(item["hit"]))
+        elo_gap_totals[_elo_gap_bucket(float(item["elo_gap"]))].append(float(item["hit"]))
+
+    tournament_accuracy = {
+        tournament: sum(values) / len(values)
+        for tournament, values in tournament_totals.items()
+        if len(values) >= 5
+    }
+    elo_gap_accuracy = {
+        bucket: sum(values) / len(values)
+        for bucket, values in elo_gap_totals.items()
+        if values
+    }
+
     return BacktestResult(
         matches_evaluated=evaluated,
-        accuracy=sum(item["hit"] for item in metrics) / evaluated,
-        log_loss=sum(item["log_loss"] for item in metrics) / evaluated,
-        brier_score=sum(item["brier"] for item in metrics) / evaluated,
-        avg_confidence=sum(item["confidence"] for item in metrics) / evaluated,
-        baseline_home_accuracy=sum(item["baseline_home_hit"] for item in metrics) / evaluated,
-        baseline_elo_accuracy=sum(item["baseline_elo_hit"] for item in metrics) / evaluated,
+        accuracy=sum(float(item["hit"]) for item in metrics) / evaluated,
+        log_loss=sum(float(item["log_loss"]) for item in metrics) / evaluated,
+        brier_score=sum(float(item["brier"]) for item in metrics) / evaluated,
+        avg_confidence=sum(float(item["confidence"]) for item in metrics) / evaluated,
+        baseline_home_accuracy=sum(float(item["baseline_home_hit"]) for item in metrics) / evaluated,
+        baseline_elo_accuracy=sum(float(item["baseline_elo_hit"]) for item in metrics) / evaluated,
+        tournament_accuracy=tournament_accuracy,
+        elo_gap_accuracy=elo_gap_accuracy,
     )
 
 
@@ -417,12 +472,15 @@ def run_backtest(
     results: pd.DataFrame,
     matches_to_test: int = 200,
     min_history_matches: int = 500,
+    form_base: float = 0.83,
+    form_ref: float = 1.2,
+    form_scale: float = 0.16,
 ) -> BacktestResult:
     clean = results.loc[results["home_score"].notna() & results["away_score"].notna()].copy()
     clean = clean.sort_values("date").reset_index(drop=True)
     test_slice = clean.iloc[-matches_to_test:]
 
-    metrics: list[dict[str, float]] = []
+    metrics: list[dict[str, float | str]] = []
 
     for _, row in test_slice.iterrows():
         history = clean.loc[clean["date"] < row["date"]]
@@ -435,6 +493,9 @@ def run_backtest(
             team_b=row["away_team"],
             match_date=str(row["date"].date()),
             neutral=bool(row["neutral"]),
+            form_base=form_base,
+            form_ref=form_ref,
+            form_scale=form_scale,
         )
         metrics.append(_evaluate_single_match(row, prediction))
 
@@ -467,7 +528,7 @@ def run_rolling_backtest(
         if fold_rows.empty:
             break
 
-        metrics: list[dict[str, float]] = []
+        metrics: list[dict[str, float | str]] = []
         for row_index, row in fold_rows.iterrows():
             history = clean.iloc[:row_index]
             if len(history) < min_history_matches:
@@ -486,3 +547,54 @@ def run_rolling_backtest(
         start = end
 
     return reports
+
+
+def calibrate_time_decay(
+    results: pd.DataFrame,
+    candidates: list[float] | None = None,
+    matches_to_test: int = 300,
+    min_history_matches: int = 500,
+) -> dict[float, float]:
+    candidate_values = candidates or [180.0, 270.0, 360.0, 450.0, 540.0, 630.0, 720.0]
+    original_value = TIME_DECAY_HALF_LIFE_DAYS
+    scores: dict[float, float] = {}
+
+    for candidate in candidate_values:
+        try:
+            globals()["TIME_DECAY_HALF_LIFE_DAYS"] = candidate
+            report = run_backtest(
+                results=results,
+                matches_to_test=matches_to_test,
+                min_history_matches=min_history_matches,
+            )
+            scores[candidate] = report.log_loss
+        finally:
+            globals()["TIME_DECAY_HALF_LIFE_DAYS"] = original_value
+
+    return scores
+
+
+def calibrate_form_constants(
+    results: pd.DataFrame,
+    matches_to_test: int = 300,
+    min_history_matches: int = 500,
+) -> dict[tuple[float, float, float], float]:
+    form_bases = [0.75, 0.80, 0.83, 0.87, 0.90]
+    form_refs = [1.0, 1.1, 1.2, 1.3, 1.5]
+    form_scales = [0.10, 0.13, 0.16, 0.20, 0.25]
+    scores: dict[tuple[float, float, float], float] = {}
+
+    for form_base in form_bases:
+        for form_ref in form_refs:
+            for form_scale in form_scales:
+                report = run_backtest(
+                    results=results,
+                    matches_to_test=matches_to_test,
+                    min_history_matches=min_history_matches,
+                    form_base=form_base,
+                    form_ref=form_ref,
+                    form_scale=form_scale,
+                )
+                scores[(form_base, form_ref, form_scale)] = report.log_loss
+
+    return scores

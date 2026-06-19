@@ -4,7 +4,13 @@ import argparse
 from pathlib import Path
 
 from .data import download_results, load_results
-from .model import predict_match, run_backtest, run_rolling_backtest
+from .model import (
+    calibrate_form_constants,
+    calibrate_time_decay,
+    predict_match,
+    run_backtest,
+    run_rolling_backtest,
+)
 from .output import render_prediction, render_tiktok_script, write_probability_chart_svg
 
 
@@ -45,6 +51,24 @@ def build_parser() -> argparse.ArgumentParser:
     rolling_parser.add_argument("--folds", type=int, default=5)
     rolling_parser.add_argument("--min-history", type=int, default=500)
     rolling_parser.add_argument("--force-download", action="store_true")
+
+    calibrate_parser = subparsers.add_parser(
+        "calibrate",
+        help="Encuentra el TIME_DECAY_HALF_LIFE optimo por log-loss",
+    )
+    calibrate_parser.add_argument(
+        "--matches", type=int, default=300, help="Partidos a usar en cada evaluacion"
+    )
+    calibrate_parser.add_argument("--min-history", type=int, default=500)
+    calibrate_parser.add_argument("--force-download", action="store_true")
+
+    calibrate_form_parser = subparsers.add_parser(
+        "calibrate-form",
+        help="Encuentra las constantes de forma optimas por log-loss",
+    )
+    calibrate_form_parser.add_argument("--matches", type=int, default=300)
+    calibrate_form_parser.add_argument("--min-history", type=int, default=500)
+    calibrate_form_parser.add_argument("--force-download", action="store_true")
 
     predict_parser = subparsers.add_parser("predict", help="Predice un partido")
     predict_parser.add_argument("--team-a", required=True, help="Equipo local o equipo A")
@@ -103,6 +127,13 @@ def main() -> None:
         print(f"--- Baselines de comparacion ---")
         print(f"- Baseline siempre local: {report.baseline_home_accuracy * 100:.2f}%")
         print(f"- Baseline Elo puro: {report.baseline_elo_accuracy * 100:.2f}%")
+        print("--- Accuracy por torneo (min 5 partidos) ---")
+        for torneo, acc in sorted(report.tournament_accuracy.items(), key=lambda x: -x[1]):
+            print(f" {torneo}: {acc * 100:.1f}%")
+        print("--- Accuracy por brecha de Elo ---")
+        for rango in ["0-50", "51-100", "101-200", "201-350", "350+"]:
+            if rango in report.elo_gap_accuracy:
+                print(f" {rango}: {report.elo_gap_accuracy[rango] * 100:.1f}%")
         return
 
     if args.command == "backtest-rolling":
@@ -128,6 +159,43 @@ def main() -> None:
             f"log_loss={average_log_loss:.4f} "
             f"brier={average_brier:.4f}"
         )
+        return
+
+    if args.command == "calibrate":
+        results = load_results(force_download=args.force_download)
+        scores = calibrate_time_decay(
+            results=results,
+            matches_to_test=args.matches,
+            min_history_matches=args.min_history,
+        )
+        print("Calibracion TIME_DECAY_HALF_LIFE_DAYS")
+        print(f"{'Valor':>10} {'Log loss':>10}")
+        for value, log_loss in sorted(scores.items()):
+            marker = " <-- actual" if value == 540.0 else ""
+            print(f"{value:>10.0f} {log_loss:>10.4f}{marker}")
+        best = min(scores, key=scores.get)
+        print(f"\nMejor valor encontrado: {best:.0f} dias (log_loss={scores[best]:.4f})")
+        print("Para aplicarlo: edita TIME_DECAY_HALF_LIFE_DAYS en config.py")
+        return
+
+    if args.command == "calibrate-form":
+        results = load_results(force_download=args.force_download)
+        scores = calibrate_form_constants(
+            results=results,
+            matches_to_test=args.matches,
+            min_history_matches=args.min_history,
+        )
+        best = min(scores, key=scores.get)
+        current = (0.83, 1.2, 0.16)
+        print("Calibracion constantes de forma (top 10 por log-loss)")
+        print(f"{'base':>6} {'ref':>6} {'scale':>6} {'log_loss':>10}")
+        for combo, ll in sorted(scores.items(), key=lambda x: x[1])[:10]:
+            marker = " <-- actual" if combo == current else ""
+            print(f"{combo[0]:>6.2f} {combo[1]:>6.2f} {combo[2]:>6.2f} {ll:>10.4f}{marker}")
+        print(
+            f"\nMejor combinacion: form_base={best[0]}, form_ref={best[1]}, form_scale={best[2]}"
+        )
+        print("Para aplicarlo: edita predict_match en model.py lineas 301-302")
         return
 
     if args.command == "predict":
