@@ -906,3 +906,158 @@ def calibrate_form_constants(
     )
 
     return scores
+
+
+def run_ablation(
+    results: pd.DataFrame,
+    matches_to_test: int = 200,
+    min_history_matches: int = 500,
+) -> dict[str, BacktestResult]:
+    experiments = {
+        "baseline_completo": dict(
+            use_form=True,
+            use_mismatch=True,
+            use_scoring=True,
+            use_clean_sheet=True,
+        ),
+        "sin_form": dict(
+            use_form=False,
+            use_mismatch=True,
+            use_scoring=True,
+            use_clean_sheet=True,
+        ),
+        "sin_mismatch": dict(
+            use_form=True,
+            use_mismatch=False,
+            use_scoring=True,
+            use_clean_sheet=True,
+        ),
+        "sin_scoring": dict(
+            use_form=True,
+            use_mismatch=True,
+            use_scoring=False,
+            use_clean_sheet=True,
+        ),
+        "sin_clean_sheet": dict(
+            use_form=True,
+            use_mismatch=True,
+            use_scoring=True,
+            use_clean_sheet=False,
+        ),
+        "solo_elo_y_ataque": dict(
+            use_form=False,
+            use_mismatch=False,
+            use_scoring=False,
+            use_clean_sheet=False,
+        ),
+    }
+    clean = (
+        results.loc[results["home_score"].notna() & results["away_score"].notna()]
+        .copy()
+        .sort_values("date")
+        .reset_index(drop=True)
+    )
+    test_slice = clean.iloc[-matches_to_test:]
+    elo_cache = _build_elo_cache(clean, test_slice, min_history_matches)
+    contexts = _build_calibration_contexts(clean, test_slice, elo_cache, min_history_matches)
+    results_map: dict[str, BacktestResult] = {}
+
+    for name, flags in experiments.items():
+        metrics: list[dict[str, float | str]] = []
+        for context in contexts:
+            row = context["row"]
+            team_a_snapshot = context["team_a_snapshot"]
+            team_b_snapshot = context["team_b_snapshot"]
+            base_goals = float(context["base_goals"])
+            attack_a = float(context["attack_a"])
+            defense_a = float(context["defense_a"])
+            attack_b = float(context["attack_b"])
+            defense_b = float(context["defense_b"])
+            elo_factor_a = float(context["elo_factor_a"])
+            elo_factor_b = float(context["elo_factor_b"])
+
+            if flags["use_form"]:
+                form_factor_a = _clamp(
+                    0.75 + (team_a_snapshot.recent_points_adjusted - 1.5) * 0.10, 0.72, 1.28
+                )
+                form_factor_b = _clamp(
+                    0.75 + (team_b_snapshot.recent_points_adjusted - 1.5) * 0.10, 0.72, 1.28
+                )
+            else:
+                form_factor_a = form_factor_b = 1.0
+
+            if flags["use_mismatch"]:
+                mismatch_boost_a = float(context["mismatch_boost_a"])
+                mismatch_boost_b = float(context["mismatch_boost_b"])
+                suppression_a = float(context["suppression_a"])
+                suppression_b = float(context["suppression_b"])
+            else:
+                mismatch_boost_a = mismatch_boost_b = 1.0
+                suppression_a = suppression_b = 1.0
+
+            if flags["use_scoring"]:
+                scoring_factor_a = float(context["scoring_factor_a"])
+                scoring_factor_b = float(context["scoring_factor_b"])
+            else:
+                scoring_factor_a = scoring_factor_b = 1.0
+
+            if flags["use_clean_sheet"]:
+                clean_sheet_pressure_a = float(context["clean_sheet_pressure_a"])
+                clean_sheet_pressure_b = float(context["clean_sheet_pressure_b"])
+            else:
+                clean_sheet_pressure_a = clean_sheet_pressure_b = 1.0
+
+            lambda_a = _clamp(
+                base_goals
+                * attack_a
+                * defense_b
+                * elo_factor_a
+                * form_factor_a
+                * mismatch_boost_a
+                * suppression_a
+                * scoring_factor_a
+                * clean_sheet_pressure_a,
+                MIN_EXPECTED_GOALS,
+                MAX_EXPECTED_GOALS,
+            )
+            lambda_b = _clamp(
+                base_goals
+                * attack_b
+                * defense_a
+                * elo_factor_b
+                * form_factor_b
+                * mismatch_boost_b
+                * scoring_factor_b
+                * clean_sheet_pressure_b
+                * suppression_b,
+                MIN_EXPECTED_GOALS,
+                MAX_EXPECTED_GOALS,
+            )
+
+            win_a, draw, win_b, best_score = _probability_matrix(lambda_a, lambda_b)
+            weight = float(context["shrinkage_weight"])
+            neutral_prob = 1.0 / 3.0
+            win_a = weight * win_a + (1.0 - weight) * neutral_prob
+            draw = weight * draw + (1.0 - weight) * neutral_prob
+            win_b = weight * win_b + (1.0 - weight) * neutral_prob
+
+            prediction = Prediction(
+                team_a=str(row["home_team"]),
+                team_b=str(row["away_team"]),
+                match_date=str(row["date"].date()),
+                neutral=bool(row["neutral"]),
+                team_a_snapshot=team_a_snapshot,
+                team_b_snapshot=team_b_snapshot,
+                expected_goals_a=lambda_a,
+                expected_goals_b=lambda_b,
+                win_prob_a=win_a,
+                draw_prob=draw,
+                win_prob_b=win_b,
+                most_likely_score=best_score,
+                shrinkage_weight=weight,
+            )
+            metrics.append(_evaluate_single_match(row, prediction))
+
+        results_map[name] = _finalize_backtest(metrics)
+
+    return results_map

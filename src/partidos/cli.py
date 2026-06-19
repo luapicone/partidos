@@ -8,6 +8,7 @@ from .model import (
     calibrate_form_constants,
     calibrate_time_decay,
     predict_match,
+    run_ablation,
     run_backtest,
     run_rolling_backtest,
 )
@@ -69,6 +70,14 @@ def build_parser() -> argparse.ArgumentParser:
     calibrate_form_parser.add_argument("--matches", type=int, default=300)
     calibrate_form_parser.add_argument("--min-history", type=int, default=500)
     calibrate_form_parser.add_argument("--force-download", action="store_true")
+
+    ablation_parser = subparsers.add_parser(
+        "ablation",
+        help="Mide el impacto de cada factor del modelo por separado",
+    )
+    ablation_parser.add_argument("--matches", type=int, default=200)
+    ablation_parser.add_argument("--min-history", type=int, default=500)
+    ablation_parser.add_argument("--force-download", action="store_true")
 
     predict_parser = subparsers.add_parser("predict", help="Predice un partido")
     predict_parser.add_argument("--team-a", required=True, help="Equipo local o equipo A")
@@ -196,6 +205,22 @@ def main() -> None:
             f"\nMejor combinacion: form_base={best[0]}, form_ref={best[1]}, form_scale={best[2]}"
         )
         print("Para aplicarlo: edita predict_match en model.py lineas 301-302")
+        return
+
+    if args.command == "ablation":
+        results = load_results(force_download=args.force_download)
+        report = run_ablation(
+            results=results,
+            matches_to_test=args.matches,
+            min_history_matches=args.min_history,
+        )
+        print(f"{'Experimento':<22} {'Accuracy':>9} {'Log loss':>10} {'Brier':>8}")
+        print("-" * 53)
+        for name, result in report.items():
+            print(
+                f"{name:<22} {result.accuracy * 100:>8.2f}% "
+                f"{result.log_loss:>10.4f} {result.brier_score:>8.4f}"
+            )
         return
 
     if args.command == "predict":
