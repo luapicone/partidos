@@ -354,14 +354,6 @@ def predict_match(
         form_base + (team_b_snapshot.recent_points_adjusted - form_ref) * form_scale, 0.72, 1.28
     )
 
-    matchup_gap = elo_edge / MISMATCH_ELO_DIVISOR
-    mismatch_boost_a = _clamp(1.0 + max(matchup_gap, 0.0) * 0.18, 1.0, 1.32)
-    mismatch_boost_b = _clamp(1.0 + max(-matchup_gap, 0.0) * 0.18, 1.0, 1.32)
-    suppression_a = _clamp(1.0 - max(-matchup_gap, 0.0) * 0.12, 0.72, 1.0)
-    suppression_b = _clamp(1.0 - max(matchup_gap, 0.0) * 0.12, 0.55, 1.0)
-
-    scoring_factor_a = _clamp(0.85 + team_a_snapshot.scoring_rate * 0.35, 0.85, 1.20)
-    scoring_factor_b = _clamp(0.85 + team_b_snapshot.scoring_rate * 0.35, 0.85, 1.20)
     clean_sheet_pressure_a = _clamp(1.08 - team_b_snapshot.clean_sheet_rate * 0.14, 0.92, 1.08)
     clean_sheet_pressure_b = _clamp(1.08 - team_a_snapshot.clean_sheet_rate * 0.20, 0.80, 1.08)
 
@@ -371,9 +363,6 @@ def predict_match(
         * defense_b
         * elo_factor_a
         * form_factor_a
-        * mismatch_boost_a
-        * suppression_a
-        * scoring_factor_a
         * clean_sheet_pressure_a,
         MIN_EXPECTED_GOALS,
         MAX_EXPECTED_GOALS,
@@ -384,10 +373,7 @@ def predict_match(
         * defense_a
         * elo_factor_b
         * form_factor_b
-        * mismatch_boost_b
-        * scoring_factor_b
-        * clean_sheet_pressure_b
-        * suppression_b,
+        * clean_sheet_pressure_b,
         MIN_EXPECTED_GOALS,
         MAX_EXPECTED_GOALS,
     )
