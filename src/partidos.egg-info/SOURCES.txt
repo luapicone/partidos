@@ -1,0 +1,14 @@
+README.md
+pyproject.toml
+src/partidos/__init__.py
+src/partidos/cli.py
+src/partidos/config.py
+src/partidos/data.py
+src/partidos/model.py
+src/partidos/output.py
+src/partidos.egg-info/PKG-INFO
+src/partidos.egg-info/SOURCES.txt
+src/partidos.egg-info/dependency_links.txt
+src/partidos.egg-info/entry_points.txt
+src/partidos.egg-info/requires.txt
+src/partidos.egg-info/top_level.txt
