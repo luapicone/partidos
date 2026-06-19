@@ -165,13 +165,12 @@ def _weighted_average(series: pd.Series, weights: pd.Series, fallback: float) ->
     return float((series * weights).sum() / total_weight)
 
 
-def build_team_snapshot(
-    results: pd.DataFrame,
+def _build_team_snapshot_from_matches(
+    matches: pd.DataFrame,
     ratings: dict[str, float],
     team: str,
     reference_date: pd.Timestamp,
 ) -> TeamSnapshot:
-    matches = _team_matches(results, team)
     if matches.empty:
         return TeamSnapshot(
             team=team,
@@ -241,6 +240,16 @@ def build_team_snapshot(
             (recent["goals_against"] == 0).astype(float), recent["sample_weight"], 0.25
         ),
     )
+
+
+def build_team_snapshot(
+    results: pd.DataFrame,
+    ratings: dict[str, float],
+    team: str,
+    reference_date: pd.Timestamp,
+) -> TeamSnapshot:
+    matches = _team_matches(results, team)
+    return _build_team_snapshot_from_matches(matches, ratings, team, reference_date)
 
 
 def _clamp(value: float, low: float, high: float) -> float:
@@ -561,6 +570,224 @@ def run_rolling_backtest(
     return reports
 
 
+def _build_elo_cache(
+    clean: pd.DataFrame,
+    test_slice: pd.DataFrame,
+    min_history_matches: int,
+) -> dict[int, dict[str, float]]:
+    target_indices = set(test_slice.index.tolist())
+    elo_cache: dict[int, dict[str, float]] = {}
+    ratings: dict[str, float] = {}
+
+    for row_index, row in clean.iterrows():
+        if row_index in target_indices and row_index >= min_history_matches:
+            elo_cache[row_index] = ratings.copy()
+
+        home = row["home_team"]
+        away = row["away_team"]
+        ratings.setdefault(home, ELO_BASE)
+        ratings.setdefault(away, ELO_BASE)
+
+        home_rating = ratings[home]
+        away_rating = ratings[away]
+
+        home_advantage = 0.0 if bool(row["neutral"]) else HOME_ADVANTAGE
+        expected_home = _expected_from_elo(home_rating + home_advantage, away_rating)
+        expected_away = 1.0 - expected_home
+
+        if row["home_score"] > row["away_score"]:
+            actual_home, actual_away = 1.0, 0.0
+        elif row["home_score"] < row["away_score"]:
+            actual_home, actual_away = 0.0, 1.0
+        else:
+            actual_home = actual_away = 0.5
+
+        goal_diff = abs(int(row["home_score"]) - int(row["away_score"]))
+        multiplier = _goal_margin_multiplier(goal_diff) if goal_diff else 1.0
+        adjustment = ELO_K * multiplier * tournament_weight(row["tournament"])
+
+        ratings[home] = home_rating + adjustment * (actual_home - expected_home)
+        ratings[away] = away_rating + adjustment * (actual_away - expected_away)
+
+    return elo_cache
+
+
+def _build_calibration_contexts(
+    clean: pd.DataFrame,
+    test_slice: pd.DataFrame,
+    elo_cache: dict[int, dict[str, float]],
+    min_history_matches: int,
+) -> list[dict[str, object]]:
+    contexts: list[dict[str, object]] = []
+    teams = set(test_slice["home_team"].tolist()) | set(test_slice["away_team"].tolist())
+    team_matches_cache = {team: _team_matches(clean, team) for team in teams}
+
+    for row_index, row in test_slice.iterrows():
+        if row_index not in elo_cache:
+            continue
+
+        history = clean.loc[clean["date"] < row["date"]]
+        if len(history) < min_history_matches:
+            continue
+
+        ratings = elo_cache[row_index]
+        match_ts = row["date"]
+        team_a_matches = team_matches_cache[row["home_team"]].loc[
+            team_matches_cache[row["home_team"]]["date"] < match_ts
+        ]
+        team_b_matches = team_matches_cache[row["away_team"]].loc[
+            team_matches_cache[row["away_team"]]["date"] < match_ts
+        ]
+        team_a_snapshot = _build_team_snapshot_from_matches(
+            team_a_matches, ratings, row["home_team"], match_ts
+        )
+        team_b_snapshot = _build_team_snapshot_from_matches(
+            team_b_matches, ratings, row["away_team"], match_ts
+        )
+        base_goals = float((history["home_score"].mean() + history["away_score"].mean()) / 2.0)
+        attack_a = _clamp(team_a_snapshot.recent_goals_for_adjusted / max(base_goals, 0.1), 0.42, 2.35)
+        defense_a = _clamp(team_a_snapshot.recent_goals_against_adjusted / max(base_goals, 0.1), 0.35, 2.0)
+        attack_b = _clamp(team_b_snapshot.recent_goals_for_adjusted / max(base_goals, 0.1), 0.42, 2.35)
+        defense_b = _clamp(team_b_snapshot.recent_goals_against_adjusted / max(base_goals, 0.1), 0.35, 2.0)
+        elo_edge = team_a_snapshot.elo - team_b_snapshot.elo + (0 if bool(row["neutral"]) else HOME_ADVANTAGE)
+        elo_factor_a = _clamp(math.exp(elo_edge / 700.0), 0.68, 1.65)
+        elo_factor_b = _clamp(math.exp(-elo_edge / 700.0), 0.55, 1.45)
+        matchup_gap = elo_edge / MISMATCH_ELO_DIVISOR
+        mismatch_boost_a = _clamp(1.0 + max(matchup_gap, 0.0) * 0.18, 1.0, 1.32)
+        mismatch_boost_b = _clamp(1.0 + max(-matchup_gap, 0.0) * 0.18, 1.0, 1.32)
+        suppression_a = _clamp(1.0 - max(-matchup_gap, 0.0) * 0.12, 0.72, 1.0)
+        suppression_b = _clamp(1.0 - max(matchup_gap, 0.0) * 0.12, 0.55, 1.0)
+        scoring_factor_a = _clamp(0.85 + team_a_snapshot.scoring_rate * 0.35, 0.85, 1.20)
+        scoring_factor_b = _clamp(0.85 + team_b_snapshot.scoring_rate * 0.35, 0.85, 1.20)
+        clean_sheet_pressure_a = _clamp(1.08 - team_b_snapshot.clean_sheet_rate * 0.14, 0.92, 1.08)
+        clean_sheet_pressure_b = _clamp(1.08 - team_a_snapshot.clean_sheet_rate * 0.20, 0.80, 1.08)
+        elo_gap = abs(elo_edge)
+        shrinkage_weight = _shrinkage_weight(elo_gap)
+
+        contexts.append(
+            {
+                "row": row,
+                "team_a_snapshot": team_a_snapshot,
+                "team_b_snapshot": team_b_snapshot,
+                "base_goals": base_goals,
+                "attack_a": attack_a,
+                "defense_a": defense_a,
+                "attack_b": attack_b,
+                "defense_b": defense_b,
+                "elo_edge": elo_edge,
+                "elo_factor_a": elo_factor_a,
+                "elo_factor_b": elo_factor_b,
+                "mismatch_boost_a": mismatch_boost_a,
+                "mismatch_boost_b": mismatch_boost_b,
+                "suppression_a": suppression_a,
+                "suppression_b": suppression_b,
+                "scoring_factor_a": scoring_factor_a,
+                "scoring_factor_b": scoring_factor_b,
+                "clean_sheet_pressure_a": clean_sheet_pressure_a,
+                "clean_sheet_pressure_b": clean_sheet_pressure_b,
+                "shrinkage_weight": shrinkage_weight,
+            }
+        )
+
+    return contexts
+
+
+def _evaluate_with_cached_elo(
+    clean: pd.DataFrame,
+    test_slice: pd.DataFrame,
+    elo_cache: dict[int, dict[str, float]],
+    min_history_matches: int,
+    matches_to_test: int,
+    form_base: float,
+    form_ref: float,
+    form_scale: float,
+) -> BacktestResult:
+    metrics: list[dict[str, float | str]] = []
+    contexts = _build_calibration_contexts(clean, test_slice, elo_cache, min_history_matches)
+
+    for context in contexts:
+        row = context["row"]
+        team_a_snapshot = context["team_a_snapshot"]
+        team_b_snapshot = context["team_b_snapshot"]
+        base_goals = float(context["base_goals"])
+        match_ts = row["date"]
+        attack_a = float(context["attack_a"])
+        defense_a = float(context["defense_a"])
+        attack_b = float(context["attack_b"])
+        defense_b = float(context["defense_b"])
+        elo_edge = float(context["elo_edge"])
+        elo_factor_a = float(context["elo_factor_a"])
+        elo_factor_b = float(context["elo_factor_b"])
+
+        form_factor_a = _clamp(
+            form_base + (team_a_snapshot.recent_points_adjusted - form_ref) * form_scale, 0.72, 1.28
+        )
+        form_factor_b = _clamp(
+            form_base + (team_b_snapshot.recent_points_adjusted - form_ref) * form_scale, 0.72, 1.28
+        )
+        mismatch_boost_a = float(context["mismatch_boost_a"])
+        mismatch_boost_b = float(context["mismatch_boost_b"])
+        suppression_a = float(context["suppression_a"])
+        suppression_b = float(context["suppression_b"])
+        scoring_factor_a = float(context["scoring_factor_a"])
+        scoring_factor_b = float(context["scoring_factor_b"])
+        clean_sheet_pressure_a = float(context["clean_sheet_pressure_a"])
+        clean_sheet_pressure_b = float(context["clean_sheet_pressure_b"])
+
+        lambda_a = _clamp(
+            base_goals
+            * attack_a
+            * defense_b
+            * elo_factor_a
+            * form_factor_a
+            * mismatch_boost_a
+            * suppression_a
+            * scoring_factor_a
+            * clean_sheet_pressure_a,
+            MIN_EXPECTED_GOALS,
+            MAX_EXPECTED_GOALS,
+        )
+        lambda_b = _clamp(
+            base_goals
+            * attack_b
+            * defense_a
+            * elo_factor_b
+            * form_factor_b
+            * mismatch_boost_b
+            * scoring_factor_b
+            * clean_sheet_pressure_b
+            * suppression_b,
+            MIN_EXPECTED_GOALS,
+            MAX_EXPECTED_GOALS,
+        )
+
+        win_a, draw, win_b, best_score = _probability_matrix(lambda_a, lambda_b)
+        weight = float(context["shrinkage_weight"])
+        neutral_prob = 1.0 / 3.0
+        win_a = weight * win_a + (1.0 - weight) * neutral_prob
+        draw = weight * draw + (1.0 - weight) * neutral_prob
+        win_b = weight * win_b + (1.0 - weight) * neutral_prob
+
+        prediction = Prediction(
+            team_a=row["home_team"],
+            team_b=row["away_team"],
+            match_date=str(match_ts.date()),
+            neutral=bool(row["neutral"]),
+            team_a_snapshot=team_a_snapshot,
+            team_b_snapshot=team_b_snapshot,
+            expected_goals_a=lambda_a,
+            expected_goals_b=lambda_b,
+            win_prob_a=win_a,
+            draw_prob=draw,
+            win_prob_b=win_b,
+            most_likely_score=best_score,
+            shrinkage_weight=weight,
+        )
+        metrics.append(_evaluate_single_match(row, prediction))
+
+    return _finalize_backtest(metrics)
+
+
 def calibrate_time_decay(
     results: pd.DataFrame,
     candidates: list[float] | None = None,
@@ -594,15 +821,26 @@ def calibrate_form_constants(
     form_bases = [0.75, 0.80, 0.83, 0.87, 0.90]
     form_refs = [1.0, 1.1, 1.2, 1.3, 1.5]
     form_scales = [0.10, 0.13, 0.16, 0.20, 0.25]
-    scores: dict[tuple[float, float, float], float] = {}
+    clean = (
+        results.loc[results["home_score"].notna() & results["away_score"].notna()]
+        .copy()
+        .sort_values("date")
+        .reset_index(drop=True)
+    )
 
+    test_slice = clean.iloc[-matches_to_test:]
+    elo_cache = _build_elo_cache(clean, test_slice, min_history_matches)
+
+    scores: dict[tuple[float, float, float], float] = {}
     for form_base in form_bases:
         for form_ref in form_refs:
             for form_scale in form_scales:
-                report = run_backtest(
-                    results=results,
-                    matches_to_test=matches_to_test,
+                report = _evaluate_with_cached_elo(
+                    clean=clean,
+                    test_slice=test_slice,
+                    elo_cache=elo_cache,
                     min_history_matches=min_history_matches,
+                    matches_to_test=matches_to_test,
                     form_base=form_base,
                     form_ref=form_ref,
                     form_scale=form_scale,
