@@ -39,6 +39,22 @@ partidos predict \
   --tiktok-script
 ```
 
+## Generar grafico de probabilidades
+
+```bash
+partidos predict \
+  --team-a "Brazil" \
+  --team-b "Haiti" \
+  --date 2026-06-19 \
+  --neutral \
+  --chart
+```
+
+Eso genera un `SVG` en `charts/` con barras para:
+- victoria equipo A
+- empate
+- victoria equipo B
+
 ## Medir si el modelo realmente sirve
 
 ```bash
@@ -54,6 +70,7 @@ partidos backtest --matches 200
 - forma reciente ajustada por rival
 - goles esperados
 - guion corto para narracion
+- grafico `SVG` para usar en navegador o edicion de video
 
 ## Mejoras agregadas sobre el MVP inicial
 

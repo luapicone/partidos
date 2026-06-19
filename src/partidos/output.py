@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 from .model import Prediction
 
 
@@ -65,3 +68,78 @@ def render_tiktok_script(prediction: Prediction) -> str:
         f"El marcador mas probable es {prediction.team_a} {score_a} a {score_b} {prediction.team_b}. "
         f"Esto sale de rating Elo, forma reciente y promedio de goles a favor y en contra."
     )
+
+
+def _slugify(value: str) -> str:
+    value = value.lower().strip()
+    value = re.sub(r"[^a-z0-9]+", "-", value)
+    return value.strip("-") or "chart"
+
+
+def render_probability_chart_svg(prediction: Prediction) -> str:
+    probs = [
+        (prediction.team_a, prediction.win_prob_a, "#1f6feb"),
+        ("Empate", prediction.draw_prob, "#f59e0b"),
+        (prediction.team_b, prediction.win_prob_b, "#16a34a"),
+    ]
+    width = 1080
+    height = 1350
+    bar_left = 250
+    bar_width = 650
+    bar_height = 84
+    gap = 120
+    start_y = 370
+
+    bars = []
+    for index, (label, prob, color) in enumerate(probs):
+        y = start_y + index * gap
+        fill_width = max(14, bar_width * prob)
+        percent_text = f"{prob * 100:.1f}%"
+        bars.append(
+            f"""
+            <text x="120" y="{y + 54}" font-size="42" font-weight="700" fill="#e5eefb">{label}</text>
+            <rect x="{bar_left}" y="{y}" rx="24" ry="24" width="{bar_width}" height="{bar_height}" fill="#1f2937"/>
+            <rect x="{bar_left}" y="{y}" rx="24" ry="24" width="{fill_width:.1f}" height="{bar_height}" fill="{color}"/>
+            <text x="940" y="{y + 54}" text-anchor="end" font-size="44" font-weight="800" fill="#ffffff">{percent_text}</text>
+            """
+        )
+
+    score_a, score_b = prediction.most_likely_score
+    headline = f"{prediction.team_a} vs {prediction.team_b}"
+    subtitle = f"Prediccion para {prediction.match_date}"
+    footer = f"Marcador mas probable: {prediction.team_a} {score_a} - {score_b} {prediction.team_b}"
+
+    return f"""<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#081120"/>
+      <stop offset="100%" stop-color="#142642"/>
+    </linearGradient>
+  </defs>
+  <rect width="100%" height="100%" fill="url(#bg)"/>
+  <circle cx="930" cy="180" r="180" fill="#1d4ed8" opacity="0.18"/>
+  <circle cx="150" cy="1130" r="220" fill="#16a34a" opacity="0.14"/>
+  <text x="120" y="130" font-size="44" font-weight="700" fill="#93c5fd">MODELO DE PREDICCION</text>
+  <text x="120" y="220" font-size="72" font-weight="900" fill="#ffffff">{headline}</text>
+  <text x="120" y="285" font-size="34" font-weight="500" fill="#cbd5e1">{subtitle}</text>
+  <text x="120" y="995" font-size="32" font-weight="600" fill="#93c5fd">Resultado mas probable</text>
+  <text x="120" y="1055" font-size="58" font-weight="900" fill="#ffffff">{footer}</text>
+  <text x="120" y="1170" font-size="28" font-weight="500" fill="#cbd5e1">Basado en Elo, forma reciente ajustada y peso por torneo</text>
+  {''.join(bars)}
+</svg>
+"""
+
+
+def write_probability_chart_svg(prediction: Prediction, output_path: str | None = None) -> Path:
+    if output_path is None:
+        filename = (
+            f"{prediction.match_date}-"
+            f"{_slugify(prediction.team_a)}-vs-{_slugify(prediction.team_b)}.svg"
+        )
+        path = Path("charts") / filename
+    else:
+        path = Path(output_path)
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(render_probability_chart_svg(prediction), encoding="utf-8")
+    return path

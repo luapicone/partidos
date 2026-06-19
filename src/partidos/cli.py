@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
 from .data import download_results, load_results
 from .model import predict_match, run_backtest
-from .output import render_prediction, render_tiktok_script
+from .output import render_prediction, render_tiktok_script, write_probability_chart_svg
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -56,6 +57,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Agrega una salida corta lista para narrar en video",
     )
+    predict_parser.add_argument(
+        "--chart",
+        action="store_true",
+        help="Genera un grafico SVG con las probabilidades del partido",
+    )
+    predict_parser.add_argument(
+        "--chart-output",
+        help="Ruta del SVG a generar. Si no se indica, se guarda en charts/",
+    )
 
     return parser
 
@@ -97,6 +107,9 @@ def main() -> None:
         if args.tiktok_script:
             print("\nGuion TikTok:\n")
             print(render_tiktok_script(prediction))
+        if args.chart or args.chart_output:
+            chart_path = write_probability_chart_svg(prediction, args.chart_output)
+            print(f"\nGrafico SVG: {Path(chart_path).resolve()}")
         return
 
 
