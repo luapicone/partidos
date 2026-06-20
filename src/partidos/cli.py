@@ -130,6 +130,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Consulta alineaciones y lesiones en API-Football (requiere API_FOOTBALL_KEY)",
     )
+    predict_parser.add_argument(
+        "--use-xg",
+        action="store_true",
+        help="Usa xG historico real de API-Football como input (consume mas calls)",
+    )
 
     return parser
 
@@ -289,6 +294,7 @@ def main() -> None:
             match_date=args.date,
             neutral=args.neutral,
             use_lineup=args.with_lineup,
+            use_xg=args.use_xg,
         )
         print(render_prediction(prediction))
         if args.with_lineup:
