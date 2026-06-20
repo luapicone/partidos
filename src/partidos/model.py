@@ -309,7 +309,7 @@ def _probability_matrix(
     return win_a / total, draw / total, win_b / total, best_score
 
 
-def _shrinkage_weight(elo_gap: float, midpoint: float = 150.0, steepness: float = 0.018) -> float:
+def _shrinkage_weight(elo_gap: float, midpoint: float = 200.0, steepness: float = 0.012) -> float:
     return 1.0 / (1.0 + math.exp(-steepness * (elo_gap - midpoint)))
 
 
@@ -318,7 +318,7 @@ def _head_to_head_factor(
     team_a: str,
     team_b: str,
     ratings: dict[str, float],
-    max_matches: int = 10,
+    max_matches: int = 5,
     min_matches: int = 3,
     half_life_days: float = 1800.0,
     strength: float = 0.06,
