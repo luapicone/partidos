@@ -1103,3 +1103,207 @@ def run_ablation(
         results_map[name] = _finalize_backtest(metrics)
 
     return results_map
+
+
+def calibrate_shrinkage(
+    results: pd.DataFrame,
+    matches_to_test: int = 300,
+    min_history_matches: int = 500,
+) -> dict[tuple[float, float], float]:
+    midpoints = [50.0, 100.0, 150.0, 200.0, 250.0, 300.0, 350.0]
+    steepnesses = [0.008, 0.012, 0.018, 0.025, 0.035]
+    clean = (
+        results.loc[results["home_score"].notna() & results["away_score"].notna()]
+        .copy()
+        .sort_values("date")
+        .reset_index(drop=True)
+    )
+    test_slice = clean.iloc[-matches_to_test:]
+    elo_cache = _build_elo_cache(clean, test_slice, min_history_matches)
+    contexts = _build_calibration_contexts(clean, test_slice, elo_cache, min_history_matches)
+
+    scores: dict[tuple[float, float], float] = {}
+    for midpoint in midpoints:
+        for steepness in steepnesses:
+            metrics: list[dict[str, float | str]] = []
+            for context in contexts:
+                row = context["row"]
+                team_a_snapshot = context["team_a_snapshot"]
+                team_b_snapshot = context["team_b_snapshot"]
+                base_goals = float(context["base_goals"])
+                attack_a = float(context["attack_a"])
+                defense_a = float(context["defense_a"])
+                attack_b = float(context["attack_b"])
+                defense_b = float(context["defense_b"])
+                elo_edge = float(context["elo_edge"])
+                elo_factor_a = float(context["elo_factor_a"])
+                elo_factor_b = float(context["elo_factor_b"])
+                clean_sheet_pressure_a = float(context["clean_sheet_pressure_a"])
+                clean_sheet_pressure_b = float(context["clean_sheet_pressure_b"])
+
+                form_factor_a = _clamp(
+                    0.75 + (team_a_snapshot.recent_points_adjusted - 1.5) * 0.10, 0.72, 1.28
+                )
+                form_factor_b = _clamp(
+                    0.75 + (team_b_snapshot.recent_points_adjusted - 1.5) * 0.10, 0.72, 1.28
+                )
+
+                lambda_a = _clamp(
+                    base_goals
+                    * attack_a
+                    * defense_b
+                    * elo_factor_a
+                    * form_factor_a
+                    * clean_sheet_pressure_a,
+                    MIN_EXPECTED_GOALS,
+                    MAX_EXPECTED_GOALS,
+                )
+                lambda_b = _clamp(
+                    base_goals
+                    * attack_b
+                    * defense_a
+                    * elo_factor_b
+                    * form_factor_b
+                    * clean_sheet_pressure_b,
+                    MIN_EXPECTED_GOALS,
+                    MAX_EXPECTED_GOALS,
+                )
+
+                win_a, draw, win_b, best_score = _probability_matrix(lambda_a, lambda_b)
+                weight = _shrinkage_weight(
+                    abs(float(elo_edge)), midpoint=midpoint, steepness=steepness
+                )
+                neutral_prob = 1.0 / 3.0
+                win_a = weight * win_a + (1.0 - weight) * neutral_prob
+                draw = weight * draw + (1.0 - weight) * neutral_prob
+                win_b = weight * win_b + (1.0 - weight) * neutral_prob
+
+                prediction = Prediction(
+                    team_a=str(row["home_team"]),
+                    team_b=str(row["away_team"]),
+                    match_date=str(row["date"].date()),
+                    neutral=bool(row["neutral"]),
+                    team_a_snapshot=team_a_snapshot,
+                    team_b_snapshot=team_b_snapshot,
+                    expected_goals_a=lambda_a,
+                    expected_goals_b=lambda_b,
+                    win_prob_a=win_a,
+                    draw_prob=draw,
+                    win_prob_b=win_b,
+                    most_likely_score=best_score,
+                    shrinkage_weight=weight,
+                )
+                metrics.append(_evaluate_single_match(row, prediction))
+
+            scores[(midpoint, steepness)] = _finalize_backtest(metrics).log_loss
+
+    return scores
+
+
+def calibrate_h2h_matches(
+    results: pd.DataFrame,
+    matches_to_test: int = 300,
+    min_history_matches: int = 500,
+) -> dict[int, float]:
+    candidates = [5, 10, 15, 20, 30, 50]
+    clean = (
+        results.loc[results["home_score"].notna() & results["away_score"].notna()]
+        .copy()
+        .sort_values("date")
+        .reset_index(drop=True)
+    )
+    test_slice = clean.iloc[-matches_to_test:]
+    elo_cache = _build_elo_cache(clean, test_slice, min_history_matches)
+    contexts = _build_calibration_contexts(clean, test_slice, elo_cache, min_history_matches)
+
+    scores: dict[int, float] = {}
+    for candidate in candidates:
+        metrics: list[dict[str, float | str]] = []
+        for context in contexts:
+            row = context["row"]
+            team_a_snapshot = context["team_a_snapshot"]
+            team_b_snapshot = context["team_b_snapshot"]
+            base_goals = float(context["base_goals"])
+            attack_a = float(context["attack_a"])
+            defense_a = float(context["defense_a"])
+            attack_b = float(context["attack_b"])
+            defense_b = float(context["defense_b"])
+            elo_factor_a = float(context["elo_factor_a"])
+            elo_factor_b = float(context["elo_factor_b"])
+            shrinkage_weight = float(context["shrinkage_weight"])
+
+            form_factor_a = _clamp(
+                0.75 + (team_a_snapshot.recent_points_adjusted - 1.5) * 0.10, 0.72, 1.28
+            )
+            form_factor_b = _clamp(
+                0.75 + (team_b_snapshot.recent_points_adjusted - 1.5) * 0.10, 0.72, 1.28
+            )
+            clean_sheet_pressure_a = _clamp(1.08 - team_b_snapshot.clean_sheet_rate * 0.14, 0.92, 1.08)
+            clean_sheet_pressure_b = _clamp(1.08 - team_a_snapshot.clean_sheet_rate * 0.20, 0.80, 1.08)
+
+            history_slice = clean.loc[clean["date"] < row["date"]]
+            ratings = elo_cache.get(row.name, {})
+            h2h_factor_a = _head_to_head_factor(
+                history_slice,
+                row["home_team"],
+                row["away_team"],
+                ratings,
+                max_matches=candidate,
+            )
+            h2h_factor_b = _head_to_head_factor(
+                history_slice,
+                row["away_team"],
+                row["home_team"],
+                ratings,
+                max_matches=candidate,
+            )
+
+            lambda_a = _clamp(
+                base_goals
+                * attack_a
+                * defense_b
+                * elo_factor_a
+                * form_factor_a
+                * clean_sheet_pressure_a
+                * h2h_factor_a,
+                MIN_EXPECTED_GOALS,
+                MAX_EXPECTED_GOALS,
+            )
+            lambda_b = _clamp(
+                base_goals
+                * attack_b
+                * defense_a
+                * elo_factor_b
+                * form_factor_b
+                * clean_sheet_pressure_b
+                * h2h_factor_b,
+                MIN_EXPECTED_GOALS,
+                MAX_EXPECTED_GOALS,
+            )
+
+            win_a, draw, win_b, best_score = _probability_matrix(lambda_a, lambda_b)
+            neutral_prob = 1.0 / 3.0
+            win_a = shrinkage_weight * win_a + (1.0 - shrinkage_weight) * neutral_prob
+            draw = shrinkage_weight * draw + (1.0 - shrinkage_weight) * neutral_prob
+            win_b = shrinkage_weight * win_b + (1.0 - shrinkage_weight) * neutral_prob
+
+            prediction = Prediction(
+                team_a=str(row["home_team"]),
+                team_b=str(row["away_team"]),
+                match_date=str(row["date"].date()),
+                neutral=bool(row["neutral"]),
+                team_a_snapshot=team_a_snapshot,
+                team_b_snapshot=team_b_snapshot,
+                expected_goals_a=lambda_a,
+                expected_goals_b=lambda_b,
+                win_prob_a=win_a,
+                draw_prob=draw,
+                win_prob_b=win_b,
+                most_likely_score=best_score,
+                shrinkage_weight=shrinkage_weight,
+            )
+            metrics.append(_evaluate_single_match(row, prediction))
+
+        scores[candidate] = _finalize_backtest(metrics).log_loss
+
+    return scores

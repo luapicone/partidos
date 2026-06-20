@@ -5,7 +5,9 @@ from pathlib import Path
 
 from .data import download_results, load_results
 from .model import (
+    calibrate_h2h_matches,
     calibrate_form_constants,
+    calibrate_shrinkage,
     calibrate_time_decay,
     predict_match,
     run_ablation,
@@ -70,6 +72,22 @@ def build_parser() -> argparse.ArgumentParser:
     calibrate_form_parser.add_argument("--matches", type=int, default=300)
     calibrate_form_parser.add_argument("--min-history", type=int, default=500)
     calibrate_form_parser.add_argument("--force-download", action="store_true")
+
+    shrinkage_parser = subparsers.add_parser(
+        "calibrate-shrinkage",
+        help="Encuentra los parametros optimos de shrinkage por log-loss",
+    )
+    shrinkage_parser.add_argument("--matches", type=int, default=300)
+    shrinkage_parser.add_argument("--min-history", type=int, default=500)
+    shrinkage_parser.add_argument("--force-download", action="store_true")
+
+    h2h_parser = subparsers.add_parser(
+        "calibrate-h2h",
+        help="Encuentra el max_matches optimo para head-to-head",
+    )
+    h2h_parser.add_argument("--matches", type=int, default=300)
+    h2h_parser.add_argument("--min-history", type=int, default=500)
+    h2h_parser.add_argument("--force-download", action="store_true")
 
     ablation_parser = subparsers.add_parser(
         "ablation",
@@ -205,6 +223,40 @@ def main() -> None:
             f"\nMejor combinacion: form_base={best[0]}, form_ref={best[1]}, form_scale={best[2]}"
         )
         print("Para aplicarlo: edita predict_match en model.py lineas 301-302")
+        return
+
+    if args.command == "calibrate-shrinkage":
+        results = load_results(force_download=args.force_download)
+        scores = calibrate_shrinkage(
+            results=results,
+            matches_to_test=args.matches,
+            min_history_matches=args.min_history,
+        )
+        print("Calibracion shrinkage (top 10 por log-loss)")
+        print(f"{'midpoint':>10} {'steepness':>10} {'log_loss':>10}")
+        for (mid, steep), ll in sorted(scores.items(), key=lambda x: x[1])[:10]:
+            marker = " <-- actual" if mid == 150.0 and steep == 0.018 else ""
+            print(f"{mid:>10.0f} {steep:>10.3f} {ll:>10.4f}{marker}")
+        best = min(scores, key=scores.get)
+        print(f"\nMejor combinacion: midpoint={best[0]:.0f}, steepness={best[1]:.3f}")
+        print("Para aplicarlo: edita _shrinkage_weight en model.py")
+        return
+
+    if args.command == "calibrate-h2h":
+        results = load_results(force_download=args.force_download)
+        scores = calibrate_h2h_matches(
+            results=results,
+            matches_to_test=args.matches,
+            min_history_matches=args.min_history,
+        )
+        print("Calibracion h2h max_matches")
+        print(f"{'max_matches':>12} {'log_loss':>10}")
+        for candidate, ll in sorted(scores.items()):
+            marker = " <-- actual" if candidate == 10 else ""
+            print(f"{candidate:>12} {ll:>10.4f}{marker}")
+        best = min(scores, key=scores.get)
+        print(f"\nMejor valor: max_matches={best}")
+        print("Para aplicarlo: edita _head_to_head_factor en model.py")
         return
 
     if args.command == "ablation":
