@@ -125,6 +125,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--chart-output",
         help="Ruta del SVG a generar. Si no se indica, se guarda en charts/",
     )
+    predict_parser.add_argument(
+        "--with-lineup",
+        action="store_true",
+        help="Consulta alineaciones y lesiones en API-Football (requiere API_FOOTBALL_KEY)",
+    )
 
     return parser
 
@@ -283,8 +288,14 @@ def main() -> None:
             team_b=args.team_b,
             match_date=args.date,
             neutral=args.neutral,
+            use_lineup=args.with_lineup,
         )
         print(render_prediction(prediction))
+        if args.with_lineup:
+            if prediction.lineup_available:
+                print("Alineacion confirmada: datos de API-Football aplicados.")
+            else:
+                print("Alineacion no disponible aun: prediccion basada solo en historial.")
         if args.tiktok_script:
             print("\nGuion TikTok:\n")
             print(render_tiktok_script(prediction))

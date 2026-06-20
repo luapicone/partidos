@@ -5,3 +5,4 @@ data/raw/
 data/processed/
 charts/
 *.pyc
+.env

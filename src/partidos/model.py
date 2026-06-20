@@ -54,6 +54,7 @@ class Prediction:
     win_prob_b: float
     most_likely_score: tuple[int, int]
     shrinkage_weight: float
+    lineup_available: bool = False
 
 
 @dataclass
@@ -375,6 +376,7 @@ def predict_match(
     form_ref: float = 1.5,
     form_scale: float = 0.10,
     rho: float = 0.1,
+    use_lineup: bool = False,
 ) -> Prediction:
     match_ts = pd.Timestamp(match_date)
     history = results.loc[
@@ -384,6 +386,24 @@ def predict_match(
     ].copy()
     if history.empty:
         raise ValueError("No hay historial previo a la fecha indicada.")
+
+    lineup_factor_a = 1.0
+    lineup_factor_b = 1.0
+    lineup_available = False
+
+    if use_lineup:
+        import os
+
+        api_key = os.environ.get("API_FOOTBALL_KEY", "")
+        if api_key:
+            from .lineup import get_lineup_factor
+
+            lineup_factor_a, lineup_factor_b, lineup_available = get_lineup_factor(
+                team_a=team_a,
+                team_b=team_b,
+                match_date=match_date,
+                api_key=api_key,
+            )
 
     ratings = build_elo_history(history)
     team_a_snapshot = build_team_snapshot(history, ratings, team_a, match_ts)
@@ -418,7 +438,8 @@ def predict_match(
         * elo_factor_a
         * form_factor_a
         * clean_sheet_pressure_a
-        * h2h_factor_a,
+        * h2h_factor_a
+        * lineup_factor_a,
         MIN_EXPECTED_GOALS,
         MAX_EXPECTED_GOALS,
     )
@@ -429,7 +450,8 @@ def predict_match(
         * elo_factor_b
         * form_factor_b
         * clean_sheet_pressure_b
-        * h2h_factor_b,
+        * h2h_factor_b
+        * lineup_factor_b,
         MIN_EXPECTED_GOALS,
         MAX_EXPECTED_GOALS,
     )
@@ -456,6 +478,7 @@ def predict_match(
         win_prob_b=win_b,
         most_likely_score=best_score,
         shrinkage_weight=weight,
+        lineup_available=lineup_available,
     )
 
 
