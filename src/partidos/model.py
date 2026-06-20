@@ -52,7 +52,7 @@ class Prediction:
     win_prob_a: float
     draw_prob: float
     win_prob_b: float
-    most_likely_score: tuple[int, int]
+    top_scores: list[tuple[int, int, float]]
     shrinkage_weight: float
     lineup_available: bool = False
 
@@ -282,12 +282,11 @@ def _dixon_coles_tau(
 
 def _probability_matrix(
     lambda_a: float, lambda_b: float, rho: float = 0.1
-) -> tuple[float, float, float, tuple[int, int]]:
+) -> tuple[float, float, float, list[tuple[int, int, float]]]:
     win_a = 0.0
     draw = 0.0
     win_b = 0.0
-    best_prob = -1.0
-    best_score = (0, 0)
+    score_probs: list[tuple[int, int, float]] = []
 
     for goals_a in range(POISSON_MAX_GOALS + 1):
         for goals_b in range(POISSON_MAX_GOALS + 1):
@@ -302,12 +301,11 @@ def _probability_matrix(
                 draw += prob
             else:
                 win_b += prob
-            if prob > best_prob:
-                best_prob = prob
-                best_score = (goals_a, goals_b)
+            score_probs.append((goals_a, goals_b, prob))
 
     total = win_a + draw + win_b
-    return win_a / total, draw / total, win_b / total, best_score
+    top_scores = sorted(score_probs, key=lambda item: item[2], reverse=True)[:3]
+    return win_a / total, draw / total, win_b / total, top_scores
 
 
 def _shrinkage_weight(elo_gap: float, midpoint: float = 200.0, steepness: float = 0.012) -> float:
@@ -377,6 +375,7 @@ def predict_match(
     form_scale: float = 0.10,
     rho: float = 0.1,
     use_lineup: bool = False,
+    use_xg: bool = False,
 ) -> Prediction:
     match_ts = pd.Timestamp(match_date)
     history = results.loc[
@@ -398,12 +397,19 @@ def predict_match(
         if api_key:
             from .lineup import get_lineup_factor
 
-            lineup_factor_a, lineup_factor_b, lineup_available = get_lineup_factor(
+            lineup_factor_a, lineup_factor_b, lineup_available, xg_a, xg_b = get_lineup_factor(
                 team_a=team_a,
                 team_b=team_b,
                 match_date=match_date,
                 api_key=api_key,
+                use_xg=use_xg,
             )
+        else:
+            xg_a = None
+            xg_b = None
+    else:
+        xg_a = None
+        xg_b = None
 
     ratings = build_elo_history(history)
     team_a_snapshot = build_team_snapshot(history, ratings, team_a, match_ts)
@@ -431,32 +437,38 @@ def predict_match(
     clean_sheet_pressure_a = _clamp(1.08 - team_b_snapshot.clean_sheet_rate * 0.14, 0.92, 1.08)
     clean_sheet_pressure_b = _clamp(1.08 - team_a_snapshot.clean_sheet_rate * 0.20, 0.80, 1.08)
 
-    lambda_a = _clamp(
-        base_goals
-        * attack_a
-        * defense_b
-        * elo_factor_a
-        * form_factor_a
-        * clean_sheet_pressure_a
-        * h2h_factor_a
-        * lineup_factor_a,
-        MIN_EXPECTED_GOALS,
-        MAX_EXPECTED_GOALS,
-    )
-    lambda_b = _clamp(
-        base_goals
-        * attack_b
-        * defense_a
-        * elo_factor_b
-        * form_factor_b
-        * clean_sheet_pressure_b
-        * h2h_factor_b
-        * lineup_factor_b,
-        MIN_EXPECTED_GOALS,
-        MAX_EXPECTED_GOALS,
-    )
+    if xg_a is not None:
+        lambda_a = _clamp(xg_a * lineup_factor_a, MIN_EXPECTED_GOALS, MAX_EXPECTED_GOALS)
+    else:
+        lambda_a = _clamp(
+            base_goals
+            * attack_a
+            * defense_b
+            * elo_factor_a
+            * form_factor_a
+            * clean_sheet_pressure_a
+            * h2h_factor_a
+            * lineup_factor_a,
+            MIN_EXPECTED_GOALS,
+            MAX_EXPECTED_GOALS,
+        )
+    if xg_b is not None:
+        lambda_b = _clamp(xg_b * lineup_factor_b, MIN_EXPECTED_GOALS, MAX_EXPECTED_GOALS)
+    else:
+        lambda_b = _clamp(
+            base_goals
+            * attack_b
+            * defense_a
+            * elo_factor_b
+            * form_factor_b
+            * clean_sheet_pressure_b
+            * h2h_factor_b
+            * lineup_factor_b,
+            MIN_EXPECTED_GOALS,
+            MAX_EXPECTED_GOALS,
+        )
 
-    win_a, draw, win_b, best_score = _probability_matrix(lambda_a, lambda_b, rho=rho)
+    win_a, draw, win_b, top_scores = _probability_matrix(lambda_a, lambda_b, rho=rho)
     elo_gap = abs(elo_edge)
     weight = _shrinkage_weight(elo_gap)
     neutral_prob = 1.0 / 3.0
@@ -476,7 +488,7 @@ def predict_match(
         win_prob_a=win_a,
         draw_prob=draw,
         win_prob_b=win_b,
-        most_likely_score=best_score,
+        top_scores=top_scores,
         shrinkage_weight=weight,
         lineup_available=lineup_available,
     )
@@ -872,7 +884,7 @@ def _evaluate_with_cached_contexts(
             MAX_EXPECTED_GOALS,
         )
 
-        win_a, draw, win_b, best_score = _probability_matrix(lambda_a, lambda_b, rho=rho)
+        win_a, draw, win_b, top_scores = _probability_matrix(lambda_a, lambda_b, rho=rho)
         weight = float(context["shrinkage_weight"])
         neutral_prob = 1.0 / 3.0
         win_a = weight * win_a + (1.0 - weight) * neutral_prob
@@ -891,7 +903,7 @@ def _evaluate_with_cached_contexts(
             win_prob_a=win_a,
             draw_prob=draw,
             win_prob_b=win_b,
-            most_likely_score=best_score,
+            top_scores=top_scores,
             shrinkage_weight=weight,
         )
         metrics.append(_evaluate_single_match(row, prediction))
@@ -1099,7 +1111,7 @@ def run_ablation(
                 MAX_EXPECTED_GOALS,
             )
 
-            win_a, draw, win_b, best_score = _probability_matrix(lambda_a, lambda_b)
+            win_a, draw, win_b, top_scores = _probability_matrix(lambda_a, lambda_b)
             weight = float(context["shrinkage_weight"])
             neutral_prob = 1.0 / 3.0
             win_a = weight * win_a + (1.0 - weight) * neutral_prob
@@ -1118,7 +1130,7 @@ def run_ablation(
                 win_prob_a=win_a,
                 draw_prob=draw,
                 win_prob_b=win_b,
-                most_likely_score=best_score,
+                top_scores=top_scores,
                 shrinkage_weight=weight,
             )
             metrics.append(_evaluate_single_match(row, prediction))
@@ -1192,7 +1204,7 @@ def calibrate_shrinkage(
                     MAX_EXPECTED_GOALS,
                 )
 
-                win_a, draw, win_b, best_score = _probability_matrix(lambda_a, lambda_b)
+                win_a, draw, win_b, top_scores = _probability_matrix(lambda_a, lambda_b)
                 weight = _shrinkage_weight(
                     abs(float(elo_edge)), midpoint=midpoint, steepness=steepness
                 )
@@ -1213,7 +1225,7 @@ def calibrate_shrinkage(
                     win_prob_a=win_a,
                     draw_prob=draw,
                     win_prob_b=win_b,
-                    most_likely_score=best_score,
+                    top_scores=top_scores,
                     shrinkage_weight=weight,
                 )
                 metrics.append(_evaluate_single_match(row, prediction))
@@ -1304,7 +1316,7 @@ def calibrate_h2h_matches(
                 MAX_EXPECTED_GOALS,
             )
 
-            win_a, draw, win_b, best_score = _probability_matrix(lambda_a, lambda_b)
+            win_a, draw, win_b, top_scores = _probability_matrix(lambda_a, lambda_b)
             neutral_prob = 1.0 / 3.0
             win_a = shrinkage_weight * win_a + (1.0 - shrinkage_weight) * neutral_prob
             draw = shrinkage_weight * draw + (1.0 - shrinkage_weight) * neutral_prob
@@ -1322,7 +1334,7 @@ def calibrate_h2h_matches(
                 win_prob_a=win_a,
                 draw_prob=draw,
                 win_prob_b=win_b,
-                most_likely_score=best_score,
+                top_scores=top_scores,
                 shrinkage_weight=shrinkage_weight,
             )
             metrics.append(_evaluate_single_match(row, prediction))

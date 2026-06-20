@@ -13,7 +13,7 @@ def _pct(value: float) -> str:
 def render_prediction(prediction: Prediction) -> str:
     a = prediction.team_a_snapshot
     b = prediction.team_b_snapshot
-    score_a, score_b = prediction.most_likely_score
+    score_a, score_b, _ = prediction.top_scores[0]
 
     if prediction.win_prob_a >= prediction.win_prob_b and prediction.win_prob_a >= prediction.draw_prob:
         headline = f"Gana {prediction.team_a}"
@@ -30,6 +30,11 @@ def render_prediction(prediction: Prediction) -> str:
             "",
             f"Resultado probable: {headline}",
             f"Marcador mas probable: {prediction.team_a} {score_a} - {score_b} {prediction.team_b}",
+            "",
+            "Top 3 marcadores:",
+            f" 1. {prediction.team_a} {score_a} - {score_b} {prediction.team_b} ({prediction.top_scores[0][2]*100:.1f}%)",
+            f" 2. {prediction.team_a} {prediction.top_scores[1][0]} - {prediction.top_scores[1][1]} {prediction.team_b} ({prediction.top_scores[1][2]*100:.1f}%)",
+            f" 3. {prediction.team_a} {prediction.top_scores[2][0]} - {prediction.top_scores[2][1]} {prediction.team_b} ({prediction.top_scores[2][2]*100:.1f}%)",
             "",
             "Probabilidades:",
             f"- {prediction.team_a}: {_pct(prediction.win_prob_a)}",
@@ -50,7 +55,7 @@ def render_prediction(prediction: Prediction) -> str:
 
 
 def render_tiktok_script(prediction: Prediction) -> str:
-    score_a, score_b = prediction.most_likely_score
+    score_a, score_b, _ = prediction.top_scores[0]
 
     if prediction.win_prob_a >= prediction.win_prob_b and prediction.win_prob_a >= prediction.draw_prob:
         verdict = f"mi prediccion es que gana {prediction.team_a}"
@@ -104,7 +109,7 @@ def render_probability_chart_svg(prediction: Prediction) -> str:
             """
         )
 
-    score_a, score_b = prediction.most_likely_score
+    score_a, score_b, _ = prediction.top_scores[0]
     headline = f"{prediction.team_a} vs {prediction.team_b}"
     subtitle = f"Prediccion para {prediction.match_date}"
     footer = f"Marcador mas probable: {prediction.team_a} {score_a} - {score_b} {prediction.team_b}"
